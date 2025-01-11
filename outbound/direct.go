@@ -196,6 +196,10 @@ func (h *Direct) DialParallel(ctx context.Context, network string, destination M
 	} else {
 		domainStrategy = dns.DomainStrategy(metadata.InboundOptions.DomainStrategy)
 	}
+  conn, err := N.DialParallel(ctx, h.dialer, network, destination, destinationAddresses, domainStrategy == dns.DomainStrategyPreferIPv6, h.fallbackDelay)
+  if err != nil {
+		return nil, err
+	}
   if network == N.NetworkTCP && h.fragment != nil {
 		conn = &FragmentedClientHelloConn{
 			Conn:        conn,
@@ -206,7 +210,7 @@ func (h *Direct) DialParallel(ctx context.Context, network string, destination M
 			maxInterval: time.Duration(h.fragment.MaxInterval) * time.Millisecond,
 		}
 	}
-	return N.DialParallel(ctx, h.dialer, network, destination, destinationAddresses, domainStrategy == dns.DomainStrategyPreferIPv6, h.fallbackDelay)
+  return conn, nil
 }
 
 func (h *Direct) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
