@@ -4,6 +4,7 @@ import (
 	"context"
 	gotls "crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -17,8 +18,9 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/common/vision"
 	"github.com/sagernet/sing-box/common/xray/buf"
-	"github.com/sagernet/sing-box/common/xray/net"
+	xrnet "github.com/sagernet/sing-box/common/xray/net"
 	"github.com/sagernet/sing-box/common/xray/pipe"
 	"github.com/sagernet/sing-box/common/xray/signal/done"
 	"github.com/sagernet/sing-box/common/xray/uuid"
@@ -346,12 +348,22 @@ func getBaseRequestURL(options *option.V2RayXHTTPBaseOptions, dest M.Socksaddr, 
 func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXHTTPBaseOptions, tlsConfig tls.Config, gotlsConfig *gotls.Config) DialerClient {
 	httpVersion := decideHTTPVersion(gotlsConfig, tlsConfig)
 	dialContext := func(ctxInner context.Context) (net.Conn, error) {
-		conn, err := dialer.DialContext(ctxInner, "tcp", dest)
+		conn, err := dialer.DialContext(ctxInner, N.NetworkTCP, dest)
 		if err != nil {
 			return nil, err
 		}
-		if httpVersion == "2" {
-			return tls.ClientHandshake(ctxInner, conn, tlsConfig)
+		var tlsConn net.Conn
+		if tlsConfig != nil && httpVersion != "3" {
+			conn, err = tls.ClientHandshake(ctxInner, conn, tlsConfig)
+			if err != nil {
+				return nil, err
+			}
+			tlsConn = conn
+		}
+		if tlsConn != nil {
+			if hook, ok := vision.HookFromContext(ctxInner); ok {
+				hook(tlsConn)
+			}
 		}
 		return conn, nil
 	}
@@ -363,7 +375,7 @@ func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXH
 	switch httpVersion {
 	case "3":
 		if keepAlivePeriod == 0 {
-			keepAlivePeriod = net.QuicgoH3KeepAlivePeriod
+			keepAlivePeriod = xrnet.QuicgoH3KeepAlivePeriod
 		}
 		if keepAlivePeriod < 0 {
 			keepAlivePeriod = 0
@@ -385,7 +397,7 @@ func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXH
 			h3TLSConfig = &gotls.Config{}
 		}
 		quicConfig := &quic.Config{
-			MaxIdleTimeout: net.ConnIdleTimeout,
+			MaxIdleTimeout: xrnet.ConnIdleTimeout,
 			// these two are defaults of quic-go/http3. the default of quic-go (no
 			// http3) is different, so it is hardcoded here for clarity.
 			// https://github.com/quic-go/quic-go/blob/b8ea5c798155950fb5bbfdd06cad1939c9355878/http3/client.go#L36-L39
@@ -405,7 +417,7 @@ func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXH
 		}
 	case "2":
 		if keepAlivePeriod == 0 {
-			keepAlivePeriod = net.ChromeH2KeepAlivePeriod
+			keepAlivePeriod = xrnet.ChromeH2KeepAlivePeriod
 		}
 		if keepAlivePeriod < 0 {
 			keepAlivePeriod = 0
@@ -414,7 +426,7 @@ func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXH
 			DialTLSContext: func(ctxInner context.Context, network string, addr string, cfg *gotls.Config) (net.Conn, error) {
 				return dialContext(ctxInner)
 			},
-			IdleConnTimeout: net.ConnIdleTimeout,
+			IdleConnTimeout: xrnet.ConnIdleTimeout,
 			ReadIdleTimeout: keepAlivePeriod,
 		}
 	default:
@@ -424,7 +436,7 @@ func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXH
 		transport = &http.Transport{
 			DialTLSContext:  httpDialContext,
 			DialContext:     httpDialContext,
-			IdleConnTimeout: net.ConnIdleTimeout,
+			IdleConnTimeout: xrnet.ConnIdleTimeout,
 			// chunked transfer download with KeepAlives is buggy with
 			// http.Client and our custom dial context.
 			DisableKeepAlives: true,

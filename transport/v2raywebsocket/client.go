@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/common/vision"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
@@ -83,6 +84,9 @@ func (c *Client) dialContext(ctx context.Context, requestURL *url.URL, headers h
 		conn, err = tls.ClientHandshake(ctx, conn, c.tlsConfig)
 		if err != nil {
 			return nil, err
+		}
+		if hook, ok := vision.HookFromContext(ctx); ok {
+			hook(conn)
 		}
 	}
 	var deadlineConn net.Conn

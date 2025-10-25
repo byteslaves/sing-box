@@ -5,12 +5,14 @@ import (
 	"encoding/base64"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/common/vision"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -221,16 +223,31 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	metadata.Destination = destination
 	var conn net.Conn
 	var baseConn net.Conn
+	var hookOnce sync.Once
+	if h.vision {
+		ctx = vision.WithHook(ctx, func(tlsConn net.Conn) {
+			if tlsConn == nil {
+				return
+			}
+			hookOnce.Do(func() {
+				baseConn = tlsConn
+			})
+		})
+	}
 	var err error
 	if h.transport != nil {
 		conn, err = h.transport.DialContext(ctx)
-		baseConn = conn
+		if err == nil && h.vision && baseConn == nil {
+			baseConn = conn
+		}
 	} else {
 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
 		if err == nil && h.tlsConfig != nil {
 			conn, err = tls.ClientHandshake(ctx, conn, h.tlsConfig)
+			if err == nil && h.vision && baseConn == nil {
+				baseConn = conn
+			}
 		}
-		baseConn = conn
 	}
 	if err != nil {
 		return nil, err
