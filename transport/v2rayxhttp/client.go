@@ -352,17 +352,15 @@ func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXH
 		if err != nil {
 			return nil, err
 		}
-		var tlsConn net.Conn
-		if tlsConfig != nil && httpVersion != "3" {
+		hook, hasHook := vision.HookFromContext(ctxInner)
+		needTLS := tlsConfig != nil && (httpVersion == "2" || (hasHook && httpVersion != "3"))
+		if needTLS {
 			conn, err = tls.ClientHandshake(ctxInner, conn, tlsConfig)
 			if err != nil {
 				return nil, err
 			}
-			tlsConn = conn
-		}
-		if tlsConn != nil {
-			if hook, ok := vision.HookFromContext(ctxInner); ok {
-				hook(tlsConn)
+			if hasHook {
+				hook(conn)
 			}
 		}
 		return conn, nil
