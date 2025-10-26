@@ -61,7 +61,7 @@ require (
 
 //replace github.com/sagernet/sing => ../sing
 
-replace github.com/sagernet/sing-vmess => github.com/starifly/sing-vmess v0.2.7-mod.2
+replace github.com/sagernet/sing-vmess => ../sing-vmess
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
