@@ -90,3 +90,8 @@ func (c *XorConn) Read(b []byte) (int, error) {
 	}
 	return n, err
 }
+
+// Upstream returns the underlying connection, allowing Vision to unwrap and access the TLS connection
+func (c *XorConn) Upstream() any {
+	return c.Conn
+}

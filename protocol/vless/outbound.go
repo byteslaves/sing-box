@@ -237,8 +237,11 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	var err error
 	if h.transport != nil {
 		conn, err = h.transport.DialContext(ctx)
-		if err == nil && h.vision && baseConn == nil {
-			baseConn = conn
+		if err == nil && h.vision {
+			if baseConn == nil {
+				h.logger.Warn("Vision enabled but hook was not called by transport, using fallback")
+				baseConn = conn
+			}
 		}
 	} else {
 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
@@ -252,6 +255,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	if err != nil {
 		return nil, err
 	}
+
 	// Apply encryption if configured
 	if h.encryption != nil {
 		conn, err = h.encryption.Handshake(conn)
@@ -259,9 +263,12 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 			return nil, E.Cause(err, "encryption handshake")
 		}
 	}
+
+	// For Vision: wrap the connection to expose the TLS connection for vless client
 	if h.vision && baseConn != nil {
 		conn = newVisionConnWrapper(conn, baseConn)
 	}
+
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
