@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -239,8 +240,12 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 		conn, err = h.transport.DialContext(ctx)
 		if err == nil && h.vision {
 			if baseConn == nil {
-				h.logger.Warn("Vision enabled but hook was not called by transport, using fallback")
-				baseConn = conn
+				// Only set baseConn if we have TLS/Reality
+				// For encryption-only mode, baseConn should remain nil
+				if h.tlsConfig != nil {
+					h.logger.Warn("Vision enabled but hook was not called by transport, using fallback")
+					baseConn = conn
+				}
 			}
 		}
 	} else {
@@ -264,14 +269,66 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 		}
 	}
 
-	// For Vision: wrap the connection to expose the TLS connection for vless client
-	if h.vision && baseConn != nil {
-		conn = newVisionConnWrapper(conn, baseConn)
+	// For Vision: wrap the connection to expose the TLS/encryption connection for vless client
+	var visionBaseConn net.Conn // The connection to pass to Vision (TLS or encryption layer)
+	if h.vision {
+		if baseConn != nil {
+			// Has TLS/Reality: use baseConn (TLS connection)
+			visionBaseConn = baseConn
+			conn = newVisionConnWrapper(conn, baseConn)
+		} else if h.encryption != nil {
+			// Only has encryption (no TLS/Reality): use encryption layer itself
+			// Find the actual encryption connection by unwrapping all layers
+			var encConn net.Conn
+			currentConn := conn
+
+			// Unwrap up to 10 layers to find the encryption layer
+			for i := 0; i < 10; i++ {
+				// Check if current connection is encryption layer
+				if currentConn != nil {
+					typeName := ""
+					if reflect.TypeOf(currentConn).Kind() == reflect.Ptr {
+						typeName = reflect.TypeOf(currentConn).Elem().Name()
+					}
+					if typeName == "CommonConn" || typeName == "XorConn" {
+						encConn = currentConn
+						break
+					}
+				}
+
+				// Try to unwrap to next layer
+				if upstream, ok := currentConn.(common.WithUpstream); ok {
+					if next := upstream.Upstream(); next != nil {
+						if nextConn, ok := next.(net.Conn); ok {
+							currentConn = nextConn
+							continue
+						}
+					}
+				}
+
+				// Can't unwrap further
+				break
+			}
+
+			if encConn != nil {
+				visionBaseConn = encConn
+				conn = newVisionConnWrapper(conn, encConn)
+			} else {
+				return nil, E.New("Vision: failed to find encryption layer (CommonConn/XorConn)")
+			}
+		} else {
+			return nil, E.New("Vision requires either TLS/Reality or Encryption")
+		}
 	}
 
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
+		if h.vision && visionBaseConn != nil {
+			// For Vision, we need to pass the base connection (TLS or encryption layer)
+			// to prepareConn so it can properly initialize VisionConn
+			return h.client.DialEarlyConnWithBase(conn, visionBaseConn, destination)
+		}
 		return h.client.DialEarlyConn(conn, destination)
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
