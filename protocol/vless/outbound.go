@@ -2,6 +2,7 @@ package vless
 
 import (
 	"context"
+	stdtls "crypto/tls"
 	"encoding/base64"
 	"net"
 	"reflect"
@@ -227,7 +228,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	var hookOnce sync.Once
 	if h.vision {
 		ctx = vision.WithHook(ctx, func(tlsConn net.Conn) {
-			if tlsConn == nil {
+			if tlsConn == nil || !isVisionTLSConn(tlsConn) {
 				return
 			}
 			hookOnce.Do(func() {
@@ -240,9 +241,8 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 		conn, err = h.transport.DialContext(ctx)
 		if err == nil && h.vision {
 			if baseConn == nil {
-				// Only set baseConn if we have TLS/Reality
-				// For encryption-only mode, baseConn should remain nil
-				if h.tlsConfig != nil {
+				// Only set baseConn if the transport delivered a TLS-capable connection
+				if isVisionTLSConn(conn) {
 					h.logger.Warn("Vision enabled but hook was not called by transport, using fallback")
 					baseConn = conn
 				}
@@ -272,6 +272,9 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	// For Vision: wrap the connection to expose the TLS/encryption connection for vless client
 	var visionBaseConn net.Conn // The connection to pass to Vision (TLS or encryption layer)
 	if h.vision {
+		if baseConn != nil && !isVisionTLSConn(baseConn) {
+			baseConn = nil
+		}
 		if baseConn != nil {
 			// Has TLS/Reality: use baseConn (TLS connection)
 			visionBaseConn = baseConn
@@ -431,4 +434,28 @@ func (c *visionConnWrapper) WriterReplaceable() bool {
 		return replacer.WriterReplaceable()
 	}
 	return true
+}
+
+// isVisionTLSConn returns true when the provided connection exposes TLS semantics Vision expects.
+func isVisionTLSConn(conn net.Conn) bool {
+	if conn == nil {
+		return false
+	}
+	if _, ok := conn.(interface{ ConnectionState() stdtls.ConnectionState }); ok {
+		return true
+	}
+	if _, ok := conn.(interface{ Handshake() error }); ok {
+		return true
+	}
+	connType := reflect.TypeOf(conn)
+	if connType == nil {
+		return false
+	}
+	if connType.Kind() == reflect.Ptr {
+		pkgPath := connType.Elem().PkgPath()
+		if pkgPath == "crypto/tls" || strings.Contains(pkgPath, "utls") || strings.Contains(pkgPath, "shadowtls") {
+			return true
+		}
+	}
+	return false
 }
