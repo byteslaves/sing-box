@@ -88,75 +88,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	// Parse encryption configuration
 	if options.Encryption != "" && options.Encryption != "none" {
-		s := strings.Split(options.Encryption, ".")
-
-		// Parse xorMode, seconds, and padding from encryption string
-		// Format: mlkem768x25519plus.MODE.RTT[.PADDING].KEY1.KEY2...
-		// MODE: native=0, xorpub=1, random=2
-		// RTT: 0rtt=1 (enable), 1rtt=0 (disable), or time like "600s"
-		xorMode := uint32(0)
-		seconds := uint32(0)
-		padding := ""
-		keyStartIndex := 0
-
-		if len(s) >= 3 && s[0] == "mlkem768x25519plus" {
-			// Parse mode
-			switch s[1] {
-			case "native":
-				xorMode = 0
-			case "xorpub":
-				xorMode = 1
-			case "random":
-				xorMode = 2
-			default:
-				logger.Warn("unknown encryption mode: ", s[1], ", using native")
-			}
-
-			// Parse RTT mode
-			if s[2] == "0rtt" {
-				seconds = 1 // enable 0-RTT
-			} else if s[2] == "1rtt" {
-				seconds = 0 // disable 0-RTT
-			} else if strings.HasSuffix(s[2], "s") {
-				// Server-side format like "600s", client should use 0-RTT
-				seconds = 1
-			}
-
-			keyStartIndex = 3
-
-			// Check if there's a padding parameter (short string before keys)
-			if len(s) > 3 {
-				// Padding is typically a short string like "100-111-1111"
-				// Keys are long base64 strings
-				if len(s[3]) < 50 { // heuristic: padding is much shorter than keys
-					testDecode, _ := base64.RawURLEncoding.DecodeString(s[3])
-					if len(testDecode) != 32 && len(testDecode) != 1184 {
-						padding = s[3]
-						keyStartIndex = 4
-					}
-				}
-			}
+		encryptionConfig, err := parseClientEncryption(options.Encryption)
+		if err != nil {
+			return nil, E.Cause(err, "parse encryption")
 		}
-
-		// Extract keys
-		var nfsPKeysBytes [][]byte
-		for i := keyStartIndex; i < len(s); i++ {
-			b, _ := base64.RawURLEncoding.DecodeString(s[i])
-			// Only accept valid key lengths: 32 bytes for X25519, 1184 bytes for ML-KEM-768 public key
-			if len(b) == 32 || len(b) == 1184 {
-				nfsPKeysBytes = append(nfsPKeysBytes, b)
-			}
-		}
-
-		if len(nfsPKeysBytes) == 0 {
-			return nil, E.New("no valid encryption keys found in encryption string")
-		}
-
 		outbound.encryption = &encryption.ClientInstance{}
-		if err := outbound.encryption.Init(nfsPKeysBytes, xorMode, seconds, padding); err != nil {
+		if err := outbound.encryption.Init(encryptionConfig.keys, encryptionConfig.xorMode, encryptionConfig.seconds, encryptionConfig.padding); err != nil {
 			return nil, E.Cause(err, "initialize encryption")
 		}
-		logger.Debug("encryption initialized: keys=", len(nfsPKeysBytes), " xorMode=", xorMode, " seconds=", seconds, " padding=", padding)
+		logger.Debug("encryption initialized: keys=", len(encryptionConfig.keys), " xorMode=", encryptionConfig.xorMode, " seconds=", encryptionConfig.seconds, " padding=", encryptionConfig.padding)
 	}
 
 	muxOpts := common.PtrValueOrDefault(options.Multiplex)
@@ -458,4 +398,72 @@ func isVisionTLSConn(conn net.Conn) bool {
 		}
 	}
 	return false
+}
+
+type clientEncryptionConfig struct {
+	keys    [][]byte
+	xorMode uint32
+	seconds uint32
+	padding string
+}
+
+func parseClientEncryption(raw string) (clientEncryptionConfig, error) {
+	var cfg clientEncryptionConfig
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return cfg, E.New("empty encryption string")
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) < 4 {
+		return cfg, E.New("invalid encryption string: missing components")
+	}
+	if parts[0] != "mlkem768x25519plus" {
+		return cfg, E.New("unsupported encryption prefix: ", parts[0])
+	}
+	switch parts[1] {
+	case "native":
+		cfg.xorMode = 0
+	case "xorpub":
+		cfg.xorMode = 1
+	case "random":
+		cfg.xorMode = 2
+	default:
+		return cfg, E.New("unknown encryption mode: ", parts[1])
+	}
+	switch parts[2] {
+	case "0rtt":
+		cfg.seconds = 1
+	case "1rtt":
+		cfg.seconds = 0
+	default:
+		return cfg, E.New("unsupported encryption RTT value: ", parts[2])
+	}
+	paddingPhase := true
+	var paddingParts []string
+	for _, segment := range parts[3:] {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			return cfg, E.New("invalid empty segment in encryption string")
+		}
+		if data, err := base64.RawURLEncoding.DecodeString(segment); err == nil {
+			if len(data) == 32 || len(data) == 1184 {
+				cfg.keys = append(cfg.keys, data)
+				paddingPhase = false
+				continue
+			}
+			return cfg, E.New("invalid encryption key length: ", len(data))
+		}
+		if paddingPhase {
+			paddingParts = append(paddingParts, segment)
+			continue
+		}
+		return cfg, E.New("invalid encryption key: ", segment)
+	}
+	if len(cfg.keys) == 0 {
+		return cfg, E.New("no valid encryption keys found in encryption string")
+	}
+	if len(paddingParts) > 0 {
+		cfg.padding = strings.Join(paddingParts, ".")
+	}
+	return cfg, nil
 }
