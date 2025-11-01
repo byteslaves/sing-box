@@ -149,6 +149,11 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 	return len(dst), nil
 }
 
+// Upstream returns the underlying connection, allowing Vision to unwrap and access the TLS connection
+func (c *CommonConn) Upstream() any {
+	return c.Conn
+}
+
 type AEAD struct {
 	cipher.AEAD
 	Nonce [12]byte

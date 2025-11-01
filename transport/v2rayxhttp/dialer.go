@@ -10,6 +10,7 @@ import (
 	"net/http/httptrace"
 	"sync"
 
+	"github.com/sagernet/sing-box/common/vision"
 	"github.com/sagernet/sing-box/common/xray"
 	"github.com/sagernet/sing-box/common/xray/signal/done"
 	"github.com/sagernet/sing-box/option"
@@ -50,6 +51,9 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, body i
 		GotConn: func(connInfo httptrace.GotConnInfo) {
 			remoteAddr = connInfo.Conn.RemoteAddr()
 			localAddr = connInfo.Conn.LocalAddr()
+			if hook, ok := vision.HookFromContext(ctx); ok {
+				hook(connInfo.Conn)
+			}
 			gotConn.Close()
 		},
 	})

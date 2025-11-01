@@ -5,12 +5,14 @@ import (
 	"encoding/base64"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/common/vision"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -42,6 +44,7 @@ type Outbound struct {
 	packetAddr      bool
 	xudp            bool
 	encryption      *encryption.ClientInstance
+	vision          bool
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
@@ -54,6 +57,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		logger:     logger,
 		dialer:     outboundDialer,
 		serverAddr: options.ServerOptions.Build(),
+		vision:     strings.HasPrefix(options.Flow, "xtls-rprx-vision"),
 	}
 	if options.TLS != nil {
 		outbound.tlsConfig, err = tls.NewClient(ctx, options.Server, common.PtrValueOrDefault(options.TLS))
@@ -152,7 +156,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		}
 		logger.Debug("encryption initialized: keys=", len(nfsPKeysBytes), " xorMode=", xorMode, " seconds=", seconds, " padding=", padding)
 	}
-	
+
 	muxOpts := common.PtrValueOrDefault(options.Multiplex)
 	if muxOpts.Enabled {
 		options.Flow = ""
@@ -218,18 +222,40 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	metadata.Outbound = h.Tag()
 	metadata.Destination = destination
 	var conn net.Conn
+	var baseConn net.Conn
+	var hookOnce sync.Once
+	if h.vision {
+		ctx = vision.WithHook(ctx, func(tlsConn net.Conn) {
+			if tlsConn == nil {
+				return
+			}
+			hookOnce.Do(func() {
+				baseConn = tlsConn
+			})
+		})
+	}
 	var err error
 	if h.transport != nil {
 		conn, err = h.transport.DialContext(ctx)
+		if err == nil && h.vision {
+			if baseConn == nil {
+				h.logger.Warn("Vision enabled but hook was not called by transport, using fallback")
+				baseConn = conn
+			}
+		}
 	} else {
 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
 		if err == nil && h.tlsConfig != nil {
 			conn, err = tls.ClientHandshake(ctx, conn, h.tlsConfig)
+			if err == nil && h.vision && baseConn == nil {
+				baseConn = conn
+			}
 		}
 	}
 	if err != nil {
 		return nil, err
 	}
+
 	// Apply encryption if configured
 	if h.encryption != nil {
 		conn, err = h.encryption.Handshake(conn)
@@ -237,6 +263,12 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 			return nil, E.Cause(err, "encryption handshake")
 		}
 	}
+
+	// For Vision: wrap the connection to expose the TLS connection for vless client
+	if h.vision && baseConn != nil {
+		conn = newVisionConnWrapper(conn, baseConn)
+	}
+
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
@@ -303,4 +335,43 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	} else {
 		return h.client.DialEarlyPacketConn(conn, destination)
 	}
+}
+
+type visionConnWrapper struct {
+	net.Conn
+	upstream net.Conn
+}
+
+var (
+	_ N.ReaderWithUpstream = (*visionConnWrapper)(nil)
+	_ N.WriterWithUpstream = (*visionConnWrapper)(nil)
+	_ common.WithUpstream  = (*visionConnWrapper)(nil)
+)
+
+func newVisionConnWrapper(conn net.Conn, upstream net.Conn) net.Conn {
+	if upstream == nil || conn == nil || conn == upstream {
+		return conn
+	}
+	return &visionConnWrapper{
+		Conn:     conn,
+		upstream: upstream,
+	}
+}
+
+func (c *visionConnWrapper) Upstream() any {
+	return c.upstream
+}
+
+func (c *visionConnWrapper) ReaderReplaceable() bool {
+	if replacer, ok := c.Conn.(N.ReaderWithUpstream); ok {
+		return replacer.ReaderReplaceable()
+	}
+	return true
+}
+
+func (c *visionConnWrapper) WriterReplaceable() bool {
+	if replacer, ok := c.Conn.(N.WriterWithUpstream); ok {
+		return replacer.WriterReplaceable()
+	}
+	return true
 }
