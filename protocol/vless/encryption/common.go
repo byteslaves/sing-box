@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -109,7 +110,7 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 	}
 	l, err := DecodeHeader(peerHeader[:]) // l: 17~17000
 	if err != nil {
-		if c.Client != nil && strings.Contains(err.Error(), "invalid header: ") { // client's 0-RTT
+		if c.Client != nil && errors.Is(err, ErrInvalidHeader) { // client's 0-RTT
 			c.Client.RWLock.Lock()
 			if bytes.HasPrefix(c.UnitedKey, c.Client.PfsKey) {
 				c.Client.Expire = time.Now() // expired
@@ -214,13 +215,15 @@ func EncodeHeader(h []byte, l int) {
 	h[4] = byte(l)
 }
 
+var ErrInvalidHeader = errors.New("invalid header")
+
 func DecodeHeader(h []byte) (l int, err error) {
 	l = int(h[3])<<8 | int(h[4])
 	if h[0] != 23 || h[1] != 3 || h[2] != 3 {
 		l = 0
 	}
 	if l < 17 || l > 17000 { // TODO: TLSv1.3 max length
-		err = E.New("invalid header: " + fmt.Sprintf("%v", h[:5])) // DO NOT CHANGE: relied by client's Read()
+		err = fmt.Errorf("%w: %v", ErrInvalidHeader, h[:5]) // DO NOT CHANGE: relied by client's Read()
 	}
 	return
 }
