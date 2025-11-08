@@ -95,7 +95,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		outbound.overrideOption = 3
 		outbound.overrideDestination = M.Socksaddr{Port: options.OverridePort}
 	}
-  if options.Fragment != nil {
+	if options.Fragment != nil {
 		if len(options.Fragment.Interval) == 0 || len(options.Fragment.Length) == 0 {
 			return nil, E.New("Invalid interval or length")
 		}
@@ -146,6 +146,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			MinLength:   int32(minLength),
 			MaxLength:   int32(maxLength),
 		}
+		outbound.isEmpty = false
 	}
 	return outbound, nil
 }
@@ -418,4 +419,3 @@ func writeFragmentedRecord(c *FragmentedClientHelloConn, contentType uint8, data
 
 	return err
 }
-
