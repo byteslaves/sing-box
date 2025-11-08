@@ -2,14 +2,14 @@ package direct
 
 import (
 	"context"
-  "crypto/rand"
-  "encoding/binary"
-  "math/big"
+	"crypto/rand"
+	"encoding/binary"
+	"math/big"
 	"net"
 	"net/netip"
-  "strconv"
-  "strings"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -45,7 +45,7 @@ type Outbound struct {
 	overrideDestination M.Socksaddr
 	isEmpty             bool
 	// loopBack *loopBackDetector
-  fragment            *Fragment
+	fragment *Fragment
 }
 
 type Fragment struct {
@@ -177,7 +177,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		return nil, err
 	}
 	return h.loopBack.NewConn(conn), nil*/
-  conn, err := h.dialer.DialContext(ctx, network, destination)
+	conn, err := h.dialer.DialContext(ctx, network, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -243,11 +243,11 @@ func (h *Outbound) DialParallel(ctx context.Context, network string, destination
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 	}
-  conn, err := dialer.DialParallelNetwork(ctx, h.dialer, network, destination, destinationAddresses, len(destinationAddresses) > 0 && destinationAddresses[0].Is6(), nil, nil, nil, h.fallbackDelay)
-  if err != nil {
+	conn, err := dialer.DialParallelNetwork(ctx, h.dialer, network, destination, destinationAddresses, len(destinationAddresses) > 0 && destinationAddresses[0].Is6(), nil, nil, nil, h.fallbackDelay)
+	if err != nil {
 		return nil, err
 	}
-  if network == N.NetworkTCP && h.fragment != nil {
+	if network == N.NetworkTCP && h.fragment != nil {
 		conn = &FragmentedClientHelloConn{
 			Conn:        conn,
 			ctx:         ctx,
@@ -257,7 +257,7 @@ func (h *Outbound) DialParallel(ctx context.Context, network string, destination
 			maxInterval: time.Duration(h.fragment.MaxInterval) * time.Millisecond,
 		}
 	}
-	return conn, nil 
+	return conn, nil
 }
 
 func (h *Outbound) DialParallelNetwork(ctx context.Context, network string, destination M.Socksaddr, destinationAddresses []netip.Addr, networkStrategy *C.NetworkStrategy, networkType []C.InterfaceType, fallbackNetworkType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, error) {
@@ -278,7 +278,21 @@ func (h *Outbound) DialParallelNetwork(ctx context.Context, network string, dest
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 	}
-	return dialer.DialParallelNetwork(ctx, h.dialer, network, destination, destinationAddresses, len(destinationAddresses) > 0 && destinationAddresses[0].Is6(), networkStrategy, networkType, fallbackNetworkType, fallbackDelay)
+	conn, err := dialer.DialParallelNetwork(ctx, h.dialer, network, destination, destinationAddresses, len(destinationAddresses) > 0 && destinationAddresses[0].Is6(), networkStrategy, networkType, fallbackNetworkType, fallbackDelay)
+	if err != nil {
+		return nil, err
+	}
+	if network == N.NetworkTCP && h.fragment != nil {
+		conn = &FragmentedClientHelloConn{
+			Conn:        conn,
+			ctx:         ctx,
+			logger:      h.logger,
+			maxLength:   int(h.fragment.MaxLength),
+			minInterval: time.Duration(h.fragment.MinInterval) * time.Millisecond,
+			maxInterval: time.Duration(h.fragment.MaxInterval) * time.Millisecond,
+		}
+	}
+	return conn, nil
 }
 
 func (h *Outbound) ListenSerialNetworkPacket(ctx context.Context, destination M.Socksaddr, destinationAddresses []netip.Addr, networkStrategy *C.NetworkStrategy, networkType []C.InterfaceType, fallbackNetworkType []C.InterfaceType, fallbackDelay time.Duration) (net.PacketConn, netip.Addr, error) {
