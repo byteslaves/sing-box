@@ -70,8 +70,8 @@ func tfoDialContextWithRetry(dialer *tfo.Dialer, ctx context.Context, network st
 }
 
 func tfoDialContextConcurrently(dialer *tfo.Dialer, ctx context.Context, network string, address string, b []byte) (net.Conn, error) {
-	if !ConcurrentDial {
-		return tfoDialContextWithRetry(dialer, ctx, network, address, b)
+	if v := ctx.Value(ctxKeyNoConcurrentDial); v == true || !ConcurrentDial {
+		return dialer.DialContext(ctx, network, address, b)
 	}
 	connChan := make(chan ConnWithErr, 3)
 	for i := 0; i < 3; i++ {

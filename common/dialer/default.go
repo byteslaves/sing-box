@@ -23,6 +23,7 @@ import (
 )
 
 var DoNotSelectInterface = false
+const ctxKeyNoConcurrentDial = "nb4a_no_concurrent_dial"
 var ConcurrentDial bool
 
 var (
@@ -420,8 +421,8 @@ func dialContextWithRetry(dialer net.Dialer, ctx context.Context, network string
 }
 
 func dialContextConcurrently(dialer net.Dialer, ctx context.Context, network string, destination string) (net.Conn, error) {
-	if !ConcurrentDial {
-		return dialContextWithRetry(dialer, ctx, network, destination)
+	if v := ctx.Value(ctxKeyNoConcurrentDial); v == true || !ConcurrentDial {
+		return dialer.DialContext(ctx, network, destination)
 	}
 	connChan := make(chan ConnWithErr, 3)
 	for i := 0; i < 3; i++ {
@@ -475,8 +476,8 @@ func listenPacketWithRetry(listener net.ListenConfig, ctx context.Context, netwo
 }
 
 func listenPacketConcurrently(listener net.ListenConfig, ctx context.Context, network string, address string) (net.PacketConn, error) {
-	if !ConcurrentDial {
-		return listenPacketWithRetry(listener, ctx, network, address)
+	if v := ctx.Value(ctxKeyNoConcurrentDial); v == true || !ConcurrentDial {
+		return listener.ListenPacket(ctx, network, address)
 	}
 	connChan := make(chan PacketConnWithErr, 3)
 	for i := 0; i < 3; i++ {
