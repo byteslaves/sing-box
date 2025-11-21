@@ -27,6 +27,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/naive"
 	"github.com/sagernet/sing-box/protocol/redirect"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
+	"github.com/sagernet/sing-box/protocol/shadowsocksr"
 	"github.com/sagernet/sing-box/protocol/shadowtls"
 	"github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/protocol/ssh"
@@ -145,7 +146,5 @@ func registerStubForRemovedInbounds(registry *inbound.Registry) {
 }
 
 func registerStubForRemovedOutbounds(registry *outbound.Registry) {
-	outbound.Register[option.ShadowsocksROutboundOptions](registry, C.TypeShadowsocksR, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksROutboundOptions) (adapter.Outbound, error) {
-		return nil, E.New("ShadowsocksR is deprecated and removed in sing-box 1.6.0")
-	})
+	shadowsocksr.RegisterOutbound(registry)
 }
