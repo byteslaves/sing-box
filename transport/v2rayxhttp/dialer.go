@@ -189,6 +189,7 @@ type WaitReadCloser struct {
 	io.ReadCloser
 	mu   sync.Mutex
 	once sync.Once
+	closed bool
 }
 
 func (w *WaitReadCloser) notify() {
@@ -199,7 +200,7 @@ func (w *WaitReadCloser) notify() {
 
 func (w *WaitReadCloser) Set(rc io.ReadCloser) {
 	w.mu.Lock()
-	if w.ReadCloser != nil {
+	if w.closed || w.ReadCloser != nil {
 		w.mu.Unlock()
 		rc.Close()
 		return
@@ -228,6 +229,11 @@ func (w *WaitReadCloser) Read(b []byte) (int, error) {
 
 func (w *WaitReadCloser) Close() error {
 	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return nil
+	}
+	w.closed = true
 	rc := w.ReadCloser
 	w.ReadCloser = nil
 	w.mu.Unlock()
