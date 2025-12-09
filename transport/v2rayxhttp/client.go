@@ -301,13 +301,25 @@ func (c *Client) Close() error {
 }
 
 func decideHTTPVersion(tlsConfig tls.Config) string {
-	if tlsConfig == nil || len(tlsConfig.NextProtos()) == 0 || tlsConfig.NextProtos()[0] == "http/1.1" {
+	if tlsConfig == nil {
 		return "1.1"
 	}
-	if tlsConfig.NextProtos()[0] == "h3" {
-		return "3"
+	nextProtos := tlsConfig.NextProtos()
+	if len(nextProtos) == 0 {
+		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS, "http/1.1"})
+		nextProtos = tlsConfig.NextProtos()
 	}
-	return "2"
+	for _, proto := range nextProtos {
+		if proto == "h3" {
+			return "3"
+		}
+	}
+	for _, proto := range nextProtos {
+		if proto == http2.NextProtoTLS {
+			return "2"
+		}
+	}
+	return "1.1"
 }
 
 func getBaseRequestURL(options *option.V2RayXHTTPBaseOptions, dest M.Socksaddr, tlsConfig tls.Config) (url.URL, error) {
