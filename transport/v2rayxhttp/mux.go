@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"math"
 	"math/big"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,7 +29,6 @@ type XmuxManager struct {
 	connections int32
 	newConnFunc func() XmuxConn
 	xmuxClients []*XmuxClient
-	mtx         sync.Mutex
 }
 
 func NewXmuxManager(options option.V2RayXHTTPXmuxOptions, newConnFunc func() XmuxConn) *XmuxManager {
@@ -63,8 +61,6 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 }
 
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
 	for i := 0; i < len(m.xmuxClients); {
 		xmuxClient := m.xmuxClients[i]
 		if xmuxClient.XmuxConn.IsClosed() ||
