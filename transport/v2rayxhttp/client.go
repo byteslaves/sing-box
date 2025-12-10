@@ -363,6 +363,11 @@ func decideHTTPVersion(tlsConfig tls.Config) string {
 		return "1.1"
 	}
 	nextProtos := tlsConfig.NextProtos()
+
+	if len(nextProtos) == 0 {
+		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS, "http/1.1"})
+	}
+	
 	if len(nextProtos) > 0 && nextProtos[0] == "h3" {
 		return "3"
 	}
