@@ -108,23 +108,12 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, body i
 			c.closed = true
 			return err
 		}
-		_, copyErr := io.Copy(io.Discard, resp.Body)
-		closeErr := resp.Body.Close()
+
+		io.Copy(io.Discard, resp.Body)
+		defer resp.Body.Close()
+
 		if resp.StatusCode != 200 {
-			c.closed = true
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
 			return fmt.Errorf("bad status code: %s", resp.Status)
-		}
-		if copyErr != nil {
-			return copyErr
-		}
-		if closeErr != nil {
-			return closeErr
 		}
 	} else {
 		// stringify the entire HTTP/1.1 request so it can be
