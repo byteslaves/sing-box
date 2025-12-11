@@ -1,6 +1,8 @@
 module github.com/sagernet/sing-box
 
-go 1.25
+go 1.24
+
+toolchain go1.24.9
 
 require (
 	github.com/anytls/sing-anytls v0.0.11
@@ -49,7 +51,7 @@ require (
 	golang.org/x/crypto v0.41.0
 	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6
 	golang.org/x/mod v0.27.0
-	golang.org/x/net v0.43.0
+	golang.org/x/net v0.48.0
 	golang.org/x/sys v0.35.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	google.golang.org/grpc v1.73.0
