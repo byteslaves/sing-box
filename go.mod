@@ -48,7 +48,7 @@ require (
 	golang.org/x/crypto v0.46.0
 	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6
 	golang.org/x/mod v0.30.0
-	golang.org/x/net v0.48.0
+	golang.org/x/net v0.47.0
 	golang.org/x/sys v0.39.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	google.golang.org/grpc v1.73.0
