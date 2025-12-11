@@ -1,8 +1,6 @@
 module github.com/sagernet/sing-box
 
-go 1.24
-
-toolchain go1.24.9
+go 1.25
 
 require (
 	github.com/anytls/sing-anytls v0.0.11
