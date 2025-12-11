@@ -40,27 +40,32 @@ import (
 )
 
 type Client struct {
-	ctx            context.Context
-	options        *option.V2RayXHTTPOptions
-	getRequestURL  func(sessionId string) url.URL
-	getRequestURL2 func(sessionId string) url.URL
-	getHTTPClient  func() (DialerClient, *XmuxClient)
-	getHTTPClient2 func() (DialerClient, *XmuxClient)
+	options            *option.V2RayXHTTPOptions
+	getRequestURL      func(sessionId string) url.URL
+	getRequestURL2     func(sessionId string) url.URL
+	acquireHTTPClient  func() (DialerClient, *XmuxClient)
+	acquireHTTPClient2 func() (DialerClient, *XmuxClient)
 }
 
 var (
-	globalDialerMu   sync.Mutex
-	globalDialerPool = map[string]*XmuxManager{}
+	globalDialerAccess sync.Mutex
+	globalDialerMap    map[string]*XmuxManager
 )
 
-func acquireHTTPClient(ctx context.Context, key string, xmuxOptions option.V2RayXHTTPXmuxOptions, newConnFunc func() XmuxConn) (DialerClient, *XmuxClient) {
-	globalDialerMu.Lock()
-	manager, exists := globalDialerPool[key]
+func acquireHTTPClientFromPool(ctx context.Context, key string, xmuxOptions option.V2RayXHTTPXmuxOptions, newConnFunc func() XmuxConn) (DialerClient, *XmuxClient) {
+	globalDialerAccess.Lock()
+	defer globalDialerAccess.Unlock()
+
+	if globalDialerMap == nil {
+		globalDialerMap = make(map[string]*XmuxManager)
+	}
+
+	manager, exists := globalDialerMap[key]
 	if !exists {
 		manager = NewXmuxManager(xmuxOptions, newConnFunc)
-		globalDialerPool[key] = manager
+		globalDialerMap[key] = manager
 	}
-	globalDialerMu.Unlock()
+
 	xmuxClient := manager.GetXmuxClient(ctx)
 	return xmuxClient.XmuxConn.(DialerClient), xmuxClient
 }
@@ -148,13 +153,13 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		}
 	}
 	dialerKey := buildDialerKey(dialer, dest, baseRequestURL, &options.V2RayXHTTPBaseOptions, xmuxOptions, tlsConfig)
-	getHTTPClient := func() (DialerClient, *XmuxClient) {
-		return acquireHTTPClient(ctx, dialerKey, xmuxOptions, func() XmuxConn {
+	httpClientSupplier := func() (DialerClient, *XmuxClient) {
+		return acquireHTTPClientFromPool(ctx, dialerKey, xmuxOptions, func() XmuxConn {
 			return createHTTPClient(dest, dialer, &options.V2RayXHTTPBaseOptions, tlsConfig)
 		})
 	}
 	getRequestURL2 := getRequestURL
-	getHTTPClient2 := getHTTPClient
+	httpClientSupplier2 := httpClientSupplier
 	if options.Download != nil {
 		options2 := options.Download
 		dialer2 := dialer
@@ -190,30 +195,29 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			}
 		}
 		dialerKey2 := buildDialerKey(dialer2, dest2, baseRequestURL2, &options2.V2RayXHTTPBaseOptions, xmuxOptions2, tlsConfig2)
-		getHTTPClient2 = func() (DialerClient, *XmuxClient) {
-			return acquireHTTPClient(ctx, dialerKey2, xmuxOptions2, func() XmuxConn {
+		httpClientSupplier2 = func() (DialerClient, *XmuxClient) {
+			return acquireHTTPClientFromPool(ctx, dialerKey2, xmuxOptions2, func() XmuxConn {
 				return createHTTPClient(dest2, dialer2, &options2.V2RayXHTTPBaseOptions, tlsConfig2)
 			})
 		}
 	}
 	return &Client{
-		ctx:            ctx,
-		options:        &options,
-		getHTTPClient:  getHTTPClient,
-		getHTTPClient2: getHTTPClient2,
-		getRequestURL:  getRequestURL,
-		getRequestURL2: getRequestURL2,
+		options:            &options,
+		getRequestURL:      getRequestURL,
+		getRequestURL2:     getRequestURL2,
+		acquireHTTPClient:  httpClientSupplier,
+		acquireHTTPClient2: httpClientSupplier2,
 	}, nil
 }
 
-func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
-	options := c.options
-	mode := c.options.Mode
+func Dial(ctx context.Context, runtime *Client) (net.Conn, error) {
+	options := runtime.options
+	mode := runtime.options.Mode
 	sessionIdUuid := uuid.New()
-	requestURL := c.getRequestURL(sessionIdUuid.String())
-	requestURL2 := c.getRequestURL2(sessionIdUuid.String())
-	httpClient, xmuxClient := c.getHTTPClient()
-	httpClient2, xmuxClient2 := c.getHTTPClient2()
+	requestURL := runtime.getRequestURL(sessionIdUuid.String())
+	requestURL2 := runtime.getRequestURL2(sessionIdUuid.String())
+	httpClient, xmuxClient := runtime.acquireHTTPClient()
+	httpClient2, xmuxClient2 := runtime.acquireHTTPClient2()
 	if xmuxClient != nil {
 		xmuxClient.OpenUsage.Add(1)
 	}
@@ -323,7 +327,7 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 			lastWrite = time.Now()
 			if xmuxClient != nil && (xmuxClient.LeftRequests.Add(-1) <= 0 ||
 				(xmuxClient.UnreusableAt != time.Time{} && lastWrite.After(xmuxClient.UnreusableAt))) {
-				httpClient, xmuxClient = c.getHTTPClient()
+				httpClient, xmuxClient = runtime.acquireHTTPClient()
 			}
 			go func(chunk buf.MultiBuffer, baseCtx context.Context) {
 				postCtx, cancelPost := context.WithCancel(baseCtx)
@@ -349,6 +353,10 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		}
 	}()
 	return &conn, nil
+}
+
+func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+	return Dial(ctx, c)
 }
 
 func (c *Client) Close() error {
