@@ -1,494 +1,250 @@
 package xhttp
 
 import (
+	"bytes"
 	"context"
-	gotls "crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
-	"net/url"
-	"reflect"
-	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 
-	"github.com/sagernet/quic-go"
-	"github.com/sagernet/quic-go/http3"
-	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/vision"
-	"github.com/sagernet/sing-box/common/xray/buf"
-	xrnet "github.com/sagernet/sing-box/common/xray/net"
-	"github.com/sagernet/sing-box/common/xray/pipe"
+	"github.com/sagernet/sing-box/common/xray"
 	"github.com/sagernet/sing-box/common/xray/signal/done"
-	"github.com/sagernet/sing-box/common/xray/uuid"
 	"github.com/sagernet/sing-box/option"
-	qtls "github.com/sagernet/sing-quic"
-	"github.com/sagernet/sing/common"
-	"github.com/sagernet/sing/common/bufio"
-	E "github.com/sagernet/sing/common/exceptions"
-	M "github.com/sagernet/sing/common/metadata"
-	N "github.com/sagernet/sing/common/network"
-	sHTTP "github.com/sagernet/sing/protocol/http"
-	"github.com/sagernet/sing/service"
-	"golang.org/x/net/http2"
 )
 
-type Client struct {
-	ctx            context.Context
-	options        *option.V2RayXHTTPOptions
-	getRequestURL  func(sessionId string) url.URL
-	getRequestURL2 func(sessionId string) url.URL
-	getHTTPClient  func() (DialerClient, *XmuxClient)
-	getHTTPClient2 func() (DialerClient, *XmuxClient)
+// interface to abstract between use of browser dialer, vs net/http
+type DialerClient interface {
+	IsClosed() bool
+
+	// ctx, url, body, uploadOnly
+	OpenStream(context.Context, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error)
+
+	// ctx, url, body, contentLength
+	PostPacket(context.Context, string, io.Reader, int64) error
 }
 
-var (
-	globalDialerMu   sync.Mutex
-	globalDialerPool = map[string]*XmuxManager{}
-)
-
-func acquireHTTPClient(ctx context.Context, key string, xmuxOptions option.V2RayXHTTPXmuxOptions, newConnFunc func() XmuxConn) (DialerClient, *XmuxClient) {
-	globalDialerMu.Lock()
-	manager, exists := globalDialerPool[key]
-	if !exists {
-		manager = NewXmuxManager(xmuxOptions, newConnFunc)
-		globalDialerPool[key] = manager
-	}
-	globalDialerMu.Unlock()
-	xmuxClient := manager.GetXmuxClient(ctx)
-	return xmuxClient.XmuxConn.(DialerClient), xmuxClient
+// implements xhttp.DialerClient in terms of direct network connections
+type DefaultDialerClient struct {
+	options     *option.V2RayXHTTPBaseOptions
+	client      *http.Client
+	closed      bool
+	httpVersion string
+	// pool of net.Conn, created using dialUploadConn
+	uploadRawPool  *sync.Pool
+	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
 }
 
-func buildDialerKey(dialer N.Dialer, dest M.Socksaddr, baseURL url.URL, baseOptions *option.V2RayXHTTPBaseOptions, xmuxOptions option.V2RayXHTTPXmuxOptions, tlsConfig tls.Config) string {
-	optionsCopy := *baseOptions
-	keyPayload := struct {
-		Dialer string
-		Dest   M.Socksaddr
-		URL    string
-		Option option.V2RayXHTTPBaseOptions
-		Xmux   option.V2RayXHTTPXmuxOptions
-		TLS    string
-	}{
-		Dialer: interfaceIdentifier(dialer),
-		Dest:   dest,
-		URL:    baseURL.String(),
-		Option: optionsCopy,
-		Xmux:   xmuxOptions,
-		TLS:    interfaceIdentifier(tlsConfig),
-	}
-	encoded, _ := json.Marshal(keyPayload)
-	return string(encoded)
+func (c *DefaultDialerClient) IsClosed() bool {
+	return c.closed
 }
 
-func interfaceIdentifier(value any) string {
-	if value == nil {
-		return "nil"
-	}
-	rv := reflect.ValueOf(value)
-	switch rv.Kind() {
-	case reflect.Ptr, reflect.UnsafePointer, reflect.Func, reflect.Map, reflect.Slice, reflect.Chan:
-		if rv.IsNil() {
-			return fmt.Sprintf("%T:nil", value)
-		}
-		return fmt.Sprintf("%T:%x", value, rv.Pointer())
-	default:
-		return fmt.Sprintf("%T:%v", value, value)
-	}
-}
-
-func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
-	configMode, err := option.NormalizeXHTTPMode(options.Mode)
-	if err != nil {
-		return nil, err
-	}
-	if options.Download != nil {
-		options.Download.Mode, err = option.NormalizeXHTTPMode(options.Download.Mode)
-		if err != nil {
-			return nil, err
-		}
-		if configMode == "stream-one" {
-			return nil, E.New(`download is not allowed when mode is "stream-one"`)
-		}
-	}
-	mode := configMode
-	dest := serverAddr
-	_, isReality := tlsConfig.(*tls.RealityClientConfig)
-	if mode == "auto" {
-		mode = "packet-up"
-		if isReality {
-			mode = "stream-one"
-			if options.Download != nil {
-				mode = "stream-up"
+func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
+	// this is done when the TCP/UDP connection to the server was established,
+	// and we can unblock the Dial function and print correct net addresses in
+	// logs
+	gotConn := done.New()
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			remoteAddr = connInfo.Conn.RemoteAddr()
+			localAddr = connInfo.Conn.LocalAddr()
+			if hook, ok := vision.HookFromContext(ctx); ok {
+				hook(connInfo.Conn)
 			}
-		}
-	}
-	options.Mode = mode
-	baseRequestURL, err := getBaseRequestURL(
-		&options.V2RayXHTTPBaseOptions, dest, tlsConfig,
-	)
-	if err != nil {
-		return nil, err
-	}
-	getRequestURL := func(sessionId string) url.URL {
-		requestURL := baseRequestURL
-		requestURL.Path += sessionId
-		return requestURL
-	}
-	var xmuxOptions option.V2RayXHTTPXmuxOptions
-	if options.Xmux != nil {
-		xmuxOptions = *options.Xmux
-		if err := xmuxOptions.Validate(); err != nil {
-			return nil, err
-		}
-	}
-	dialerKey := buildDialerKey(dialer, dest, baseRequestURL, &options.V2RayXHTTPBaseOptions, xmuxOptions, tlsConfig)
-	getHTTPClient := func() (DialerClient, *XmuxClient) {
-		return acquireHTTPClient(ctx, dialerKey, xmuxOptions, func() XmuxConn {
-			return createHTTPClient(dest, dialer, &options.V2RayXHTTPBaseOptions, tlsConfig)
-		})
-	}
-	getRequestURL2 := getRequestURL
-	getHTTPClient2 := getHTTPClient
-	if options.Download != nil {
-		options2 := options.Download
-		dialer2 := dialer
-		if options2.Detour != "" {
-			var ok bool
-			dialer2, ok = service.FromContext[adapter.OutboundManager](ctx).Outbound(options2.Detour)
-			if !ok {
-				return nil, E.New("outbound detour not found: ", options2.Detour)
-			}
-		}
-		dest2 := options2.ServerOptions.Build()
-		var tlsConfig2 tls.Config
-		if options2.TLS != nil {
-			tlsConfig2, err = tls.NewClient(ctx, options2.Server, common.PtrValueOrDefault(options2.TLS))
-			if err != nil {
-				return nil, err
-			}
-		}
-		baseRequestURL2, err := getBaseRequestURL(&options2.V2RayXHTTPBaseOptions, dest2, tlsConfig2)
-		if err != nil {
-			return nil, err
-		}
-		getRequestURL2 = func(sessionId string) url.URL {
-			requestURL2 := baseRequestURL2
-			requestURL2.Path += sessionId
-			return requestURL2
-		}
-		var xmuxOptions2 option.V2RayXHTTPXmuxOptions
-		if options2.Xmux != nil {
-			xmuxOptions2 = *options2.Xmux
-			if err := xmuxOptions2.Validate(); err != nil {
-				return nil, err
-			}
-		}
-		dialerKey2 := buildDialerKey(dialer2, dest2, baseRequestURL2, &options2.V2RayXHTTPBaseOptions, xmuxOptions2, tlsConfig2)
-		getHTTPClient2 = func() (DialerClient, *XmuxClient) {
-			return acquireHTTPClient(ctx, dialerKey2, xmuxOptions2, func() XmuxConn {
-				return createHTTPClient(dest2, dialer2, &options2.V2RayXHTTPBaseOptions, tlsConfig2)
-			})
-		}
-	}
-	return &Client{
-		ctx:            ctx,
-		options:        &options,
-		getHTTPClient:  getHTTPClient,
-		getHTTPClient2: getHTTPClient2,
-		getRequestURL:  getRequestURL,
-		getRequestURL2: getRequestURL2,
-	}, nil
-}
-
-func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
-	options := c.options
-	mode := c.options.Mode
-	sessionIdUuid := uuid.New()
-	requestURL := c.getRequestURL(sessionIdUuid.String())
-	requestURL2 := c.getRequestURL2(sessionIdUuid.String())
-	httpClient, xmuxClient := c.getHTTPClient()
-	httpClient2, xmuxClient2 := c.getHTTPClient2()
-	if xmuxClient != nil {
-		xmuxClient.OpenUsage.Add(1)
-	}
-	if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-		xmuxClient2.OpenUsage.Add(1)
-	}
-	var closed atomic.Int32
-	uploadBaseCtx := context.WithoutCancel(ctx)
-	uploadCtx, cancelUpload := context.WithCancel(uploadBaseCtx)
-	reader, writer := io.Pipe()
-	conn := splitConn{
-		writer: writer,
-		onClose: func() {
-			if closed.Add(1) > 1 {
-				return
-			}
-			cancelUpload()
-			if xmuxClient != nil {
-				xmuxClient.OpenUsage.Add(-1)
-			}
-			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-				xmuxClient2.OpenUsage.Add(-1)
-			}
+			gotConn.Close()
 		},
+	})
+	method := "GET" // stream-down
+	if body != nil {
+		method = "POST" // stream-up/one
 	}
-	var err error
-	if mode == "stream-one" {
-		requestURL.Path = options.GetNormalizedPath()
-		if xmuxClient != nil {
-			xmuxClient.LeftRequests.Add(-1)
-		}
-		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), reader, false)
-		if err != nil { // browser dialer only
-			return nil, err
-		}
-		return &conn, nil
-	} else { // stream-down
-		if xmuxClient2 != nil {
-			xmuxClient2.LeftRequests.Add(-1)
-		}
-		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), nil, false)
-		if err != nil { // browser dialer only
-			return nil, err
-		}
+	req, _ := http.NewRequestWithContext(context.WithoutCancel(ctx), method, url, body)
+	req.Header = c.options.GetRequestHeader(url)
+	if method == "POST" && !c.options.NoGRPCHeader {
+		req.Header.Set("Content-Type", "application/grpc")
 	}
-	if mode == "stream-up" {
-		if xmuxClient != nil {
-			xmuxClient.LeftRequests.Add(-1)
-		}
-		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), reader, true)
-		if err != nil { // browser dialer only
-			return nil, err
-		}
-		return &conn, nil
-	}
-	scMaxEachPostBytes := options.GetNormalizedScMaxEachPostBytes()
-	scMinPostsIntervalMs := options.GetNormalizedScMinPostsIntervalMs()
-	if scMaxEachPostBytes.From <= buf.Size {
-		panic("`scMaxEachPostBytes` should be bigger than " + strconv.Itoa(buf.Size))
-	}
-	maxUploadSize := scMaxEachPostBytes.Rand()
-	// WithSizeLimit(0) will still allow single bytes to pass, and a lot of
-	// code relies on this behavior. Subtract 1 so that together with
-	// uploadWriter wrapper, exact size limits can be enforced
-	// uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(maxUploadSize - 1))
-	uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(maxUploadSize - buf.Size))
-	conn.writer = uploadWriter{
-		uploadPipeWriter,
-		maxUploadSize,
-	}
+	wrc = &WaitReadCloser{Wait: make(chan struct{})}
 	go func() {
-		defer uploadPipeReader.Interrupt()
-		var seq int64
-		var lastWrite time.Time
-		for {
-			select {
-			case <-uploadCtx.Done():
-				return
-			default:
+		resp, err := c.client.Do(req)
+		if err != nil {
+			if !uploadOnly { // stream-down is enough
+				c.closed = true
 			}
-			wroteRequest := done.New()
-			reqCtx := httptrace.WithClientTrace(uploadCtx, &httptrace.ClientTrace{
-				WroteRequest: func(httptrace.WroteRequestInfo) {
-					wroteRequest.Close()
-				},
-			})
-			// this intentionally makes a shallow-copy of the struct so we
-			// can reassign Path (potentially concurrently)
-			url := requestURL
-			url.Path += "/" + strconv.FormatInt(seq, 10)
-			seq += 1
-			if scMinPostsIntervalMs.From > 0 {
-				time.Sleep(time.Duration(scMinPostsIntervalMs.Rand())*time.Millisecond - time.Since(lastWrite))
-			}
-			// by offloading the uploads into a buffered pipe, multiple conn.Write
-			// calls get automatically batched together into larger POST requests.
-			// without batching, bandwidth is extremely limited.
-			chunk, err := uploadPipeReader.ReadMultiBuffer()
-			if err != nil {
-				return
-			}
-			select {
-			case <-uploadCtx.Done():
-				return
-			default:
-			}
-			lastWrite = time.Now()
-			if xmuxClient != nil && (xmuxClient.LeftRequests.Add(-1) <= 0 ||
-				(xmuxClient.UnreusableAt != time.Time{} && lastWrite.After(xmuxClient.UnreusableAt))) {
-				httpClient, xmuxClient = c.getHTTPClient()
-			}
-			go func(chunk buf.MultiBuffer, baseCtx context.Context) {
-				postCtx, cancelPost := context.WithCancel(baseCtx)
-				defer cancelPost()
-				defer wroteRequest.Close()
-				err := httpClient.PostPacket(
-					postCtx,
-					url.String(),
-					&buf.MultiBufferContainer{MultiBuffer: chunk},
-					int64(chunk.Len()),
-				)
-				if err != nil {
-					uploadPipeReader.Interrupt()
-				}
-			}(chunk, reqCtx)
-			if _, ok := httpClient.(*DefaultDialerClient); ok {
-				select {
-				case <-wroteRequest.Wait():
-				case <-uploadCtx.Done():
-					return
-				}
-			}
+			gotConn.Close()
+			wrc.Close()
+			return
 		}
+		if resp.StatusCode != 200 || uploadOnly { // stream-up
+			if resp.StatusCode != 200 {
+				c.closed = true
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close() // if it is called immediately, the upload will be interrupted also
+			wrc.Close()
+			return
+		}
+		wrc.(*WaitReadCloser).Set(resp.Body)
 	}()
-	return &conn, nil
+	<-gotConn.Wait()
+	return
 }
 
-func (c *Client) Close() error {
+func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, body io.Reader, contentLength int64) error {
+	// Detach from parent cancellation/deadline so CF flexible SSL disconnects
+	// don't leave Go's h2 client stuck in stream cleanup.
+	reqCtx := context.WithoutCancel(ctx)
+	req, err := http.NewRequestWithContext(reqCtx, "POST", url, body)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = contentLength
+	req.Header = c.options.GetRequestHeader(url)
+	if c.httpVersion != "1.1" {
+		resp, err := c.client.Do(req)
+		if err != nil {
+			c.closed = true
+			return err
+		}
+		_, copyErr := io.Copy(io.Discard, resp.Body)
+		closeErr := resp.Body.Close()
+		if resp.StatusCode != 200 {
+			c.closed = true
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			return fmt.Errorf("bad status code: %s", resp.Status)
+		}
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	} else {
+		// stringify the entire HTTP/1.1 request so it can be
+		// safely retried. if instead req.Write is called multiple
+		// times, the body is already drained after the first
+		// request
+		requestBuff := new(bytes.Buffer)
+		common.Must(req.Write(requestBuff))
+		var uploadConn any
+		var h1UploadConn *H1Conn
+		for {
+			uploadConn = c.uploadRawPool.Get()
+			newConnection := uploadConn == nil
+			if newConnection {
+				newConn, err := c.dialUploadConn(context.WithoutCancel(ctx))
+				if err != nil {
+					return err
+				}
+				h1UploadConn = NewH1Conn(newConn)
+				uploadConn = h1UploadConn
+			} else {
+				h1UploadConn = uploadConn.(*H1Conn)
+
+				// TODO: Replace 0 here with a config value later
+				// Or add some other condition for optimization purposes
+				if h1UploadConn.UnreadedResponsesCount > 0 {
+					resp, err := http.ReadResponse(h1UploadConn.RespBufReader, req)
+					if err != nil {
+						c.closed = true
+						return fmt.Errorf("error while reading response: %s", err.Error())
+					}
+					_, copyErr := io.Copy(io.Discard, resp.Body)
+					closeErr := resp.Body.Close()
+					if resp.StatusCode != 200 {
+						c.closed = true
+						return fmt.Errorf("got non-200 error response code: %d", resp.StatusCode)
+					}
+					if copyErr != nil {
+						return copyErr
+					}
+					if closeErr != nil {
+						return closeErr
+					}
+				}
+			}
+			_, err := h1UploadConn.Write(requestBuff.Bytes())
+			// if the write failed, we try another connection from
+			// the pool, until the write on a new connection fails.
+			// failed writes to a pooled connection are normal when
+			// the connection has been closed in the meantime.
+			if err == nil {
+				break
+			} else if newConnection {
+				return err
+			}
+		}
+		c.uploadRawPool.Put(uploadConn)
+	}
+
 	return nil
 }
 
-func decideHTTPVersion(tlsConfig tls.Config) string {
-	if _, ok := tlsConfig.(*tls.RealityClientConfig); ok {
-		return "2"
-	}
-	if tlsConfig == nil {
-		return "1.1"
-	}
-	nextProtos := tlsConfig.NextProtos()
-
-	if len(nextProtos) == 0 {
-		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS, "http/1.1"})
-	}
-	
-	if len(nextProtos) > 0 && nextProtos[0] == "h3" {
-		return "3"
-	}
-	if len(nextProtos) > 0 && nextProtos[0] == "http/1.1" {
-		return "1.1"
-	}
-	return "2"
+type WaitReadCloser struct {
+	Wait chan struct{}
+	io.ReadCloser
+	mu   sync.Mutex
+	once sync.Once
+	closed bool
 }
 
-func getBaseRequestURL(options *option.V2RayXHTTPBaseOptions, dest M.Socksaddr, tlsConfig tls.Config) (url.URL, error) {
-	var requestURL url.URL
-	if tlsConfig == nil {
-		requestURL.Scheme = "http"
-	} else {
-		requestURL.Scheme = "https"
-	}
-	requestURL.Host = options.Host
-	if requestURL.Host == "" && tlsConfig != nil {
-		requestURL.Host = tlsConfig.ServerName()
-	}
-	if requestURL.Host == "" {
-		requestURL.Host = dest.AddrString()
-	}
-	requestURL.Path = options.Path
-	if err := sHTTP.URLSetPath(&requestURL, options.Path); err != nil {
-		return requestURL, E.New(err, "parse path")
-	}
-	if !strings.HasPrefix(requestURL.Path, "/") {
-		requestURL.Path = "/" + requestURL.Path
-	}
-	requestURL.Path = options.GetNormalizedPath()
-	requestURL.RawQuery = options.GetNormalizedQuery()
-	return requestURL, nil
+func (w *WaitReadCloser) notify() {
+	w.once.Do(func() {
+		close(w.Wait)
+	})
 }
 
-func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXHTTPBaseOptions, tlsConfig tls.Config) DialerClient {
-	httpVersion := decideHTTPVersion(tlsConfig)
-	dialContext := func(ctxInner context.Context) (net.Conn, error) {
-		conn, err := dialer.DialContext(ctxInner, N.NetworkTCP, dest)
-		if err != nil {
-			return nil, err
-		}
-		hook, hasHook := vision.HookFromContext(ctxInner)
-		needTLS := tlsConfig != nil && httpVersion != "3"
-		if needTLS {
-			conn, err = tls.ClientHandshake(ctxInner, conn, tlsConfig)
-			if err != nil {
-				return nil, err
-			}
-			if hasHook {
-				hook(conn)
-			}
-		}
-		return conn, nil
+func (w *WaitReadCloser) Set(rc io.ReadCloser) {
+	w.mu.Lock()
+	if w.closed || w.ReadCloser != nil {
+		w.mu.Unlock()
+		rc.Close()
+		return
 	}
-	var keepAlivePeriod time.Duration
-	if options.Xmux != nil {
-		keepAlivePeriod = time.Duration(options.Xmux.HKeepAlivePeriod) * time.Second
-	}
-	var transport http.RoundTripper
-	switch httpVersion {
-	case "3":
-		if keepAlivePeriod == 0 {
-			keepAlivePeriod = xrnet.QuicgoH3KeepAlivePeriod
-		}
-		if keepAlivePeriod < 0 {
-			keepAlivePeriod = 0
-		}
-		quicConfig := &quic.Config{
-			MaxIdleTimeout: xrnet.ConnIdleTimeout,
-			// these two are defaults of quic-go/http3. the default of quic-go (no
-			// http3) is different, so it is hardcoded here for clarity.
-			// https://github.com/quic-go/quic-go/blob/b8ea5c798155950fb5bbfdd06cad1939c9355878/http3/client.go#L36-L39
-			MaxIncomingStreams: -1,
-			KeepAlivePeriod:    keepAlivePeriod,
-		}
-		transport = &http3.Transport{
-			QUICConfig: quicConfig,
-			Dial: func(ctx context.Context, addr string, tlsCfg *gotls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-				udpConn, dErr := dialer.DialContext(ctx, N.NetworkUDP, dest)
-				if dErr != nil {
-					return nil, dErr
-				}
-				return qtls.DialEarly(ctx, bufio.NewUnbindPacketConn(udpConn), udpConn.RemoteAddr(), tlsConfig, cfg)
-			},
-		}
-	case "2":
-		if keepAlivePeriod == 0 {
-			keepAlivePeriod = xrnet.ChromeH2KeepAlivePeriod
-		}
-		if keepAlivePeriod < 0 {
-			keepAlivePeriod = 0
-		}
-		transport = &http2.Transport{
-			DialTLSContext: func(ctxInner context.Context, network string, addr string, cfg *gotls.Config) (net.Conn, error) {
-				return dialContext(ctxInner)
-			},
-			IdleConnTimeout: xrnet.ConnIdleTimeout,
-			ReadIdleTimeout: keepAlivePeriod,
-		}
-	default:
-		httpDialContext := func(ctxInner context.Context, network string, addr string) (net.Conn, error) {
-			return dialContext(ctxInner)
-		}
-		transport = &http.Transport{
-			DialTLSContext:  httpDialContext,
-			DialContext:     httpDialContext,
-			IdleConnTimeout: xrnet.ConnIdleTimeout,
-			// chunked transfer download with KeepAlives is buggy with
-			// http.Client and our custom dial context.
-			DisableKeepAlives: true,
+	w.ReadCloser = rc
+	w.mu.Unlock()
+	w.notify()
+}
+
+func (w *WaitReadCloser) Read(b []byte) (int, error) {
+	w.mu.Lock()
+	rc := w.ReadCloser
+	w.mu.Unlock()
+
+	if rc == nil {
+		<-w.Wait
+		w.mu.Lock()
+		rc = w.ReadCloser
+		w.mu.Unlock()
+		if rc == nil {
+			return 0, io.ErrClosedPipe
 		}
 	}
-	client := &DefaultDialerClient{
-		options: options,
-		client: &http.Client{
-			Transport: transport,
-		},
-		httpVersion:    httpVersion,
-		uploadRawPool:  &sync.Pool{},
-		dialUploadConn: dialContext,
+	return rc.Read(b)
+}
+
+func (w *WaitReadCloser) Close() error {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return nil
 	}
-	return client
+	w.closed = true
+	rc := w.ReadCloser
+	w.ReadCloser = nil
+	w.mu.Unlock()
+
+	if rc != nil {
+		return rc.Close()
+	}
+
+	w.notify()
+	return nil
 }
