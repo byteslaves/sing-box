@@ -225,8 +225,6 @@ func Dial(ctx context.Context, runtime *Client) (net.Conn, error) {
 		xmuxClient2.OpenUsage.Add(1)
 	}
 	var closed atomic.Int32
-	uploadBaseCtx := context.WithoutCancel(ctx)
-	uploadCtx, cancelUpload := context.WithCancel(uploadBaseCtx)
 	reader, writer := io.Pipe()
 	conn := splitConn{
 		writer: writer,
@@ -234,7 +232,6 @@ func Dial(ctx context.Context, runtime *Client) (net.Conn, error) {
 			if closed.Add(1) > 1 {
 				return
 			}
-			cancelUpload()
 			if xmuxClient != nil {
 				xmuxClient.OpenUsage.Add(-1)
 			}
@@ -293,13 +290,8 @@ func Dial(ctx context.Context, runtime *Client) (net.Conn, error) {
 		var seq int64
 		var lastWrite time.Time
 		for {
-			select {
-			case <-uploadCtx.Done():
-				return
-			default:
-			}
 			wroteRequest := done.New()
-			reqCtx := httptrace.WithClientTrace(uploadCtx, &httptrace.ClientTrace{
+			reqCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 				WroteRequest: func(httptrace.WroteRequestInfo) {
 					wroteRequest.Close()
 				},
@@ -319,22 +311,15 @@ func Dial(ctx context.Context, runtime *Client) (net.Conn, error) {
 			if err != nil {
 				return
 			}
-			select {
-			case <-uploadCtx.Done():
-				return
-			default:
-			}
 			lastWrite = time.Now()
 			if xmuxClient != nil && (xmuxClient.LeftRequests.Add(-1) <= 0 ||
 				(xmuxClient.UnreusableAt != time.Time{} && lastWrite.After(xmuxClient.UnreusableAt))) {
 				httpClient, xmuxClient = runtime.acquireHTTPClient()
 			}
-			go func(chunk buf.MultiBuffer, baseCtx context.Context) {
-				postCtx, cancelPost := context.WithCancel(baseCtx)
-				defer cancelPost()
+			go func(chunk buf.MultiBuffer, traceCtx context.Context) {
 				defer wroteRequest.Close()
 				err := httpClient.PostPacket(
-					postCtx,
+					traceCtx,
 					url.String(),
 					&buf.MultiBufferContainer{MultiBuffer: chunk},
 					int64(chunk.Len()),
@@ -344,11 +329,7 @@ func Dial(ctx context.Context, runtime *Client) (net.Conn, error) {
 				}
 			}(chunk, reqCtx)
 			if _, ok := httpClient.(*DefaultDialerClient); ok {
-				select {
-				case <-wroteRequest.Wait():
-				case <-uploadCtx.Done():
-					return
-				}
+				<-wroteRequest.Wait()
 			}
 		}
 	}()
