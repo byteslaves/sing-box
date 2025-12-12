@@ -8,7 +8,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	xrnet "github.com/sagernet/sing-box/common/xray/net"
 	"github.com/sagernet/sing-box/option"
+)
+
+const (
+	// Cloudflare flexible mode closes HTTP/2 tunnels after roughly 5 minutes.
+	// Keep Xmux reuse below the idle timeout so we proactively rotate tunnels.
+	xmuxReuseSafetyMargin = 15 * time.Second
 )
 
 type XmuxConn interface {
@@ -53,8 +60,17 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 	if x := m.options.GetNormalizedHMaxRequestTimes().Rand(); x > 0 {
 		xmuxClient.LeftRequests.Store(x)
 	}
-	if x := m.options.GetNormalizedHMaxReusableSecs().Rand(); x > 0 {
-		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
+	reuseSeconds := m.options.GetNormalizedHMaxReusableSecs().Rand()
+	if reuseSeconds <= 0 {
+		reuseSeconds = -1
+	}
+	if limit := int32((xrnet.ConnIdleTimeout - xmuxReuseSafetyMargin) / time.Second); limit > 0 {
+		if reuseSeconds <= 0 || time.Duration(reuseSeconds)*time.Second > xrnet.ConnIdleTimeout-xmuxReuseSafetyMargin {
+			reuseSeconds = limit
+		}
+	}
+	if reuseSeconds > 0 {
+		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(reuseSeconds) * time.Second)
 	}
 	m.xmuxClients = append(m.xmuxClients, xmuxClient)
 	return xmuxClient
