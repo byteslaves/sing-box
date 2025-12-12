@@ -52,7 +52,7 @@ var (
 	globalDialerMap    map[string]*XmuxManager
 )
 
-func acquireHTTPClientFromPool(ctx context.Context, key string, xmuxOptions option.V2RayXHTTPXmuxOptions, newConnFunc func() XmuxConn) (DialerClient, *XmuxClient) {
+func getHTTPClient(ctx context.Context, key string, xmuxOptions option.V2RayXHTTPXmuxOptions, newConnFunc func() XmuxConn) (DialerClient, *XmuxClient) {
 	globalDialerAccess.Lock()
 	defer globalDialerAccess.Unlock()
 
@@ -154,7 +154,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 	dialerKey := buildDialerKey(dialer, dest, baseRequestURL, &options.V2RayXHTTPBaseOptions, xmuxOptions, tlsConfig)
 	httpClientSupplier := func() (DialerClient, *XmuxClient) {
-		return acquireHTTPClientFromPool(ctx, dialerKey, xmuxOptions, func() XmuxConn {
+		return getHTTPClient(ctx, dialerKey, xmuxOptions, func() XmuxConn {
 			return createHTTPClient(dest, dialer, &options.V2RayXHTTPBaseOptions, tlsConfig)
 		})
 	}
@@ -196,7 +196,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		}
 		dialerKey2 := buildDialerKey(dialer2, dest2, baseRequestURL2, &options2.V2RayXHTTPBaseOptions, xmuxOptions2, tlsConfig2)
 		httpClientSupplier2 = func() (DialerClient, *XmuxClient) {
-			return acquireHTTPClientFromPool(ctx, dialerKey2, xmuxOptions2, func() XmuxConn {
+			return getHTTPClient(ctx, dialerKey2, xmuxOptions2, func() XmuxConn {
 				return createHTTPClient(dest2, dialer2, &options2.V2RayXHTTPBaseOptions, tlsConfig2)
 			})
 		}
@@ -210,14 +210,14 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}, nil
 }
 
-func Dial(ctx context.Context, runtime *Client) (net.Conn, error) {
-	options := runtime.options
-	mode := runtime.options.Mode
+func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+	options := c.options
+	mode := c.options.Mode
 	sessionIdUuid := uuid.New()
-	requestURL := runtime.getRequestURL(sessionIdUuid.String())
-	requestURL2 := runtime.getRequestURL2(sessionIdUuid.String())
-	httpClient, xmuxClient := runtime.acquireHTTPClient()
-	httpClient2, xmuxClient2 := runtime.acquireHTTPClient2()
+	requestURL := c.getRequestURL(sessionIdUuid.String())
+	requestURL2 := c.getRequestURL2(sessionIdUuid.String())
+	httpClient, xmuxClient := c.acquireHTTPClient()
+	httpClient2, xmuxClient2 := c.acquireHTTPClient2()
 	if xmuxClient != nil {
 		xmuxClient.OpenUsage.Add(1)
 	}
@@ -286,58 +286,48 @@ func Dial(ctx context.Context, runtime *Client) (net.Conn, error) {
 		maxUploadSize,
 	}
 	go func() {
-		defer uploadPipeReader.Interrupt()
 		var seq int64
 		var lastWrite time.Time
 		for {
 			wroteRequest := done.New()
-			reqCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			traceCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 				WroteRequest: func(httptrace.WroteRequestInfo) {
 					wroteRequest.Close()
 				},
 			})
-			// this intentionally makes a shallow-copy of the struct so we
-			// can reassign Path (potentially concurrently)
 			url := requestURL
 			url.Path += "/" + strconv.FormatInt(seq, 10)
 			seq += 1
 			if scMinPostsIntervalMs.From > 0 {
 				time.Sleep(time.Duration(scMinPostsIntervalMs.Rand())*time.Millisecond - time.Since(lastWrite))
 			}
-			// by offloading the uploads into a buffered pipe, multiple conn.Write
-			// calls get automatically batched together into larger POST requests.
-			// without batching, bandwidth is extremely limited.
 			chunk, err := uploadPipeReader.ReadMultiBuffer()
 			if err != nil {
-				return
+				break
 			}
 			lastWrite = time.Now()
 			if xmuxClient != nil && (xmuxClient.LeftRequests.Add(-1) <= 0 ||
 				(xmuxClient.UnreusableAt != time.Time{} && lastWrite.After(xmuxClient.UnreusableAt))) {
-				httpClient, xmuxClient = runtime.acquireHTTPClient()
+				httpClient, xmuxClient = c.acquireHTTPClient()
 			}
-			go func(chunk buf.MultiBuffer, traceCtx context.Context) {
-				defer wroteRequest.Close()
+			go func() {
 				err := httpClient.PostPacket(
 					traceCtx,
 					url.String(),
 					&buf.MultiBufferContainer{MultiBuffer: chunk},
 					int64(chunk.Len()),
 				)
+				wroteRequest.Close()
 				if err != nil {
 					uploadPipeReader.Interrupt()
 				}
-			}(chunk, reqCtx)
+			}()
 			if _, ok := httpClient.(*DefaultDialerClient); ok {
 				<-wroteRequest.Wait()
 			}
 		}
 	}()
 	return &conn, nil
-}
-
-func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
-	return Dial(ctx, c)
 }
 
 func (c *Client) Close() error {
