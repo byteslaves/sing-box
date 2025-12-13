@@ -24,6 +24,7 @@ import (
 	"github.com/sagernet/sing-box/common/xray/pipe"
 	"github.com/sagernet/sing-box/common/xray/signal/done"
 	"github.com/sagernet/sing-box/common/xray/uuid"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	qtls "github.com/sagernet/sing-quic"
 	"github.com/sagernet/sing/common"
@@ -43,6 +44,7 @@ type Client struct {
 	getRequestURL2 func(sessionId string) url.URL
 	getHTTPClient  func() (DialerClient, *XmuxClient)
 	getHTTPClient2 func() (DialerClient, *XmuxClient)
+	connCounter    atomic.Int64
 }
 
 func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
@@ -61,6 +63,10 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 	mode := configMode
 	dest := serverAddr
+	client := &Client{
+		ctx:     ctx,
+		options: &options,
+	}
 	_, isReality := tlsConfig.(*tls.RealityClientConfig)
 	if mode == "auto" {
 		mode = "packet-up"
@@ -91,7 +97,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		}
 	}
 	xmuxManager := NewXmuxManager(xmuxOptions, func() XmuxConn {
-		return createHTTPClient(dest, dialer, &options.V2RayXHTTPBaseOptions, tlsConfig)
+		return createHTTPClient(dest, dialer, &options.V2RayXHTTPBaseOptions, tlsConfig, &client.connCounter)
 	})
 	getHTTPClient := func() (DialerClient, *XmuxClient) {
 		xmuxClient := xmuxManager.GetXmuxClient(ctx)
@@ -134,21 +140,18 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			}
 		}
 		xmuxManager2 := NewXmuxManager(xmuxOptions2, func() XmuxConn {
-			return createHTTPClient(dest2, dialer2, &options2.V2RayXHTTPBaseOptions, tlsConfig2)
+			return createHTTPClient(dest2, dialer2, &options2.V2RayXHTTPBaseOptions, tlsConfig2, &client.connCounter)
 		})
 		getHTTPClient2 = func() (DialerClient, *XmuxClient) {
 			xmuxClient2 := xmuxManager2.GetXmuxClient(ctx)
 			return xmuxClient2.XmuxConn.(DialerClient), xmuxClient2
 		}
 	}
-	return &Client{
-		ctx:            ctx,
-		options:        &options,
-		getHTTPClient:  getHTTPClient,
-		getHTTPClient2: getHTTPClient2,
-		getRequestURL:  getRequestURL,
-		getRequestURL2: getRequestURL2,
-	}, nil
+	client.getHTTPClient = getHTTPClient
+	client.getHTTPClient2 = getHTTPClient2
+	client.getRequestURL = getRequestURL
+	client.getRequestURL2 = getRequestURL2
+	return client, nil
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
@@ -312,7 +315,7 @@ func decideHTTPVersion(tlsConfig tls.Config) string {
 	if len(nextProtos) == 0 {
 		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS, "http/1.1"})
 	}
-	
+
 	if len(nextProtos) > 0 && nextProtos[0] == "h3" {
 		return "3"
 	}
@@ -348,8 +351,9 @@ func getBaseRequestURL(options *option.V2RayXHTTPBaseOptions, dest M.Socksaddr, 
 	return requestURL, nil
 }
 
-func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXHTTPBaseOptions, tlsConfig tls.Config) DialerClient {
+func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXHTTPBaseOptions, tlsConfig tls.Config, connCounter *atomic.Int64) DialerClient {
 	httpVersion := decideHTTPVersion(tlsConfig)
+	destLabel := dest.String()
 	dialContext := func(ctxInner context.Context) (net.Conn, error) {
 		conn, err := dialer.DialContext(ctxInner, N.NetworkTCP, dest)
 		if err != nil {
@@ -365,6 +369,10 @@ func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXH
 			if hasHook {
 				hook(conn)
 			}
+		}
+		if connCounter != nil {
+			total := connCounter.Add(1)
+			log.DebugContext(ctxInner, "[xhttp-debug] new h", httpVersion, " conn to ", destLabel, " total=", total)
 		}
 		return conn, nil
 	}
@@ -411,7 +419,11 @@ func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXH
 				return dialContext(ctxInner)
 			},
 			IdleConnTimeout: xrnet.ConnIdleTimeout,
-			ReadIdleTimeout: keepAlivePeriod,
+			// Disable ping-based keepalive to avoid conn_close_lost_ping storms in flaky mobile/CDN paths.
+			ReadIdleTimeout: 0,
+			CountError: func(errType string) {
+				log.Debug("[xhttp-debug] h2 transport error=", errType, " dest=", destLabel)
+			},
 		}
 	default:
 		httpDialContext := func(ctxInner context.Context, network string, addr string) (net.Conn, error) {
