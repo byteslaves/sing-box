@@ -124,7 +124,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 	mode := configMode
 	dest := serverAddr
-	_, isReality := tlsConfig.(*tls.RealityClientConfig)
+	isReality := isRealityConfig(tlsConfig)
 	if mode == "auto" {
 		mode = "packet-up"
 		if isReality {
@@ -362,7 +362,7 @@ func (c *Client) Close() error {
 }
 
 func decideHTTPVersion(tlsConfig tls.Config) string {
-	if _, ok := tlsConfig.(*tls.RealityClientConfig); ok {
+	if isRealityConfig(tlsConfig) {
 		return "2"
 	}
 	if tlsConfig == nil {
@@ -407,6 +407,13 @@ func getBaseRequestURL(options *option.V2RayXHTTPBaseOptions, dest M.Socksaddr, 
 	requestURL.Path = options.GetNormalizedPath()
 	requestURL.RawQuery = options.GetNormalizedQuery()
 	return requestURL, nil
+}
+
+func isRealityConfig(tlsConfig tls.Config) bool {
+	if tlsConfig == nil {
+		return false
+	}
+	return strings.Contains(fmt.Sprintf("%T", tlsConfig), ".RealityClientConfig")
 }
 
 func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXHTTPBaseOptions, tlsConfig tls.Config) DialerClient {
