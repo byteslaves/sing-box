@@ -459,23 +459,25 @@ func logXHTTPOptions(ctx context.Context, label string, base option.V2RayXHTTPBa
 	if base.Xmux != nil {
 		xmux = *base.Xmux
 	}
-	log.DebugContext(ctx,
-		"[xhttp-config] ", label,
-		" mode=", base.Mode,
-		" host=", base.Host,
-		" path=", base.Path,
-		" xpad=", base.GetNormalizedXPaddingBytes(),
-		" scMaxPost=", base.GetNormalizedScMaxEachPostBytes(),
-		" scMinInt=", base.GetNormalizedScMinPostsIntervalMs(),
-		" scMaxBuffered=", base.GetNormalizedScMaxBufferedPosts(),
-		" scStreamUpSecs=", base.GetNormalizedScStreamUpServerSecs(),
-		" xmux={maxConc=", xmux.GetNormalizedMaxConcurrency(),
-		", maxConn=", xmux.GetNormalizedMaxConnections(),
-		", cReuse=", xmux.GetNormalizedCMaxReuseTimes(),
-		", hReq=", xmux.GetNormalizedHMaxRequestTimes(),
-		", hReuseSec=", xmux.GetNormalizedHMaxReusableSecs(),
-		", hKA=", xmux.HKeepAlivePeriod, "}",
+	msg := fmt.Sprintf(
+		"[xhttp-config] %s mode=%s host=%s path=%s x_padding_bytes=%v sc_max_each_post_bytes=%v sc_min_posts_interval_ms=%v sc_max_buffered_posts=%d sc_stream_up_server_secs=%v xmux={max_concurrency=%v, max_connections=%v, c_max_reuse_times=%v, h_max_request_times=%v, h_max_reusable_secs=%v, h_keep_alive_period=%d}",
+		label,
+		base.Mode,
+		base.Host,
+		base.Path,
+		base.GetNormalizedXPaddingBytes(),
+		base.GetNormalizedScMaxEachPostBytes(),
+		base.GetNormalizedScMinPostsIntervalMs(),
+		base.GetNormalizedScMaxBufferedPosts(),
+		base.GetNormalizedScStreamUpServerSecs(),
+		xmux.GetNormalizedMaxConcurrency(),
+		xmux.GetNormalizedMaxConnections(),
+		xmux.GetNormalizedCMaxReuseTimes(),
+		xmux.GetNormalizedHMaxRequestTimes(),
+		xmux.GetNormalizedHMaxReusableSecs(),
+		xmux.HKeepAlivePeriod,
 	)
+	log.DebugContext(ctx, msg)
 }
 
 func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXHTTPBaseOptions, tlsConfig tls.Config) DialerClient {
