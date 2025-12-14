@@ -3,11 +3,14 @@ package xhttp
 import (
 	"context"
 	gotls "crypto/tls"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +46,66 @@ type Client struct {
 	getRequestURL2 func(sessionId string) url.URL
 	getHTTPClient  func() (DialerClient, *XmuxClient)
 	getHTTPClient2 func() (DialerClient, *XmuxClient)
+}
+
+var (
+	globalDialerAccess sync.Mutex
+	globalDialerMap    map[string]*XmuxManager
+)
+
+func acquireGlobalHTTPClient(ctx context.Context, key string, xmuxOptions option.V2RayXHTTPXmuxOptions, newConnFunc func() XmuxConn) (DialerClient, *XmuxClient) {
+	globalDialerAccess.Lock()
+	defer globalDialerAccess.Unlock()
+
+	if globalDialerMap == nil {
+		globalDialerMap = make(map[string]*XmuxManager)
+	}
+
+	manager, exists := globalDialerMap[key]
+	if !exists {
+		manager = NewXmuxManager(xmuxOptions, newConnFunc)
+		globalDialerMap[key] = manager
+	}
+
+	xmuxClient := manager.GetXmuxClient(ctx)
+	return xmuxClient.XmuxConn.(DialerClient), xmuxClient
+}
+
+func buildDialerKey(dialer N.Dialer, dest M.Socksaddr, baseURL url.URL, baseOptions *option.V2RayXHTTPBaseOptions, xmuxOptions option.V2RayXHTTPXmuxOptions, tlsConfig tls.Config) string {
+	optionsCopy := *baseOptions
+	keyPayload := struct {
+		Dialer string
+		Dest   M.Socksaddr
+		URL    string
+		Option option.V2RayXHTTPBaseOptions
+		Xmux   option.V2RayXHTTPXmuxOptions
+		TLS    string
+	}{
+		Dialer: interfaceIdentifier(dialer),
+		Dest:   dest,
+		URL:    baseURL.String(),
+		Option: optionsCopy,
+		Xmux:   xmuxOptions,
+		TLS:    interfaceIdentifier(tlsConfig),
+	}
+	encoded, _ := json.Marshal(keyPayload)
+	return string(encoded)
+}
+
+func interfaceIdentifier(value any) string {
+	if value == nil {
+		return "nil"
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.UnsafePointer, reflect.Func, reflect.Map, reflect.Slice, reflect.Chan:
+		if rv.IsNil() {
+			return fmt.Sprintf("%T:nil", value)
+		}
+		return fmt.Sprintf("%T:%x", value, rv.Pointer())
+	default:
+		return fmt.Sprintf("%T:%v", value, value)
+	}
 }
 
 func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
@@ -90,12 +153,11 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			return nil, err
 		}
 	}
-	xmuxManager := NewXmuxManager(xmuxOptions, func() XmuxConn {
-		return createHTTPClient(dest, dialer, &options.V2RayXHTTPBaseOptions, tlsConfig)
-	})
+	dialerKey := buildDialerKey(dialer, dest, baseRequestURL, &options.V2RayXHTTPBaseOptions, xmuxOptions, tlsConfig)
 	getHTTPClient := func() (DialerClient, *XmuxClient) {
-		xmuxClient := xmuxManager.GetXmuxClient(ctx)
-		return xmuxClient.XmuxConn.(DialerClient), xmuxClient
+		return acquireGlobalHTTPClient(ctx, dialerKey, xmuxOptions, func() XmuxConn {
+			return createHTTPClient(dest, dialer, &options.V2RayXHTTPBaseOptions, tlsConfig)
+		})
 	}
 	getRequestURL2 := getRequestURL
 	getHTTPClient2 := getHTTPClient
@@ -133,12 +195,11 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 				return nil, err
 			}
 		}
-		xmuxManager2 := NewXmuxManager(xmuxOptions2, func() XmuxConn {
-			return createHTTPClient(dest2, dialer2, &options2.V2RayXHTTPBaseOptions, tlsConfig2)
-		})
+		dialerKey2 := buildDialerKey(dialer2, dest2, baseRequestURL2, &options2.V2RayXHTTPBaseOptions, xmuxOptions2, tlsConfig2)
 		getHTTPClient2 = func() (DialerClient, *XmuxClient) {
-			xmuxClient2 := xmuxManager2.GetXmuxClient(ctx)
-			return xmuxClient2.XmuxConn.(DialerClient), xmuxClient2
+			return acquireGlobalHTTPClient(ctx, dialerKey2, xmuxOptions2, func() XmuxConn {
+				return createHTTPClient(dest2, dialer2, &options2.V2RayXHTTPBaseOptions, tlsConfig2)
+			})
 		}
 	}
 	return &Client{
@@ -312,7 +373,7 @@ func decideHTTPVersion(tlsConfig tls.Config) string {
 	if len(nextProtos) == 0 {
 		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS, "http/1.1"})
 	}
-	
+
 	if len(nextProtos) > 0 && nextProtos[0] == "h3" {
 		return "3"
 	}
