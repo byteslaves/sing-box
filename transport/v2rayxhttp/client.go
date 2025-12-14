@@ -212,7 +212,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			})
 		}
 	}
-	return &Client{
+	client := &Client{
 		ctx:            ctx,
 		options:        &options,
 		dest:           dest,
@@ -222,7 +222,12 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		getHTTPClient2: getHTTPClient2,
 		getRequestURL:  getRequestURL,
 		getRequestURL2: getRequestURL2,
-	}, nil
+	}
+	logXHTTPOptions(ctx, "main", options.V2RayXHTTPBaseOptions)
+	if options.Download != nil {
+		logXHTTPOptions(ctx, "download", options.Download.V2RayXHTTPBaseOptions)
+	}
+	return client, nil
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
@@ -447,6 +452,30 @@ func httpVersionFromClient(client DialerClient) string {
 		return defaultClient.httpVersion
 	}
 	return "unknown"
+}
+
+func logXHTTPOptions(ctx context.Context, label string, base option.V2RayXHTTPBaseOptions) {
+	xmux := option.V2RayXHTTPXmuxOptions{}
+	if base.Xmux != nil {
+		xmux = *base.Xmux
+	}
+	log.DebugContext(ctx,
+		"[xhttp-config] ", label,
+		" mode=", base.Mode,
+		" host=", base.Host,
+		" path=", base.Path,
+		" xpad=", base.GetNormalizedXPaddingBytes(),
+		" scMaxPost=", base.GetNormalizedScMaxEachPostBytes(),
+		" scMinInt=", base.GetNormalizedScMinPostsIntervalMs(),
+		" scMaxBuffered=", base.GetNormalizedScMaxBufferedPosts(),
+		" scStreamUpSecs=", base.GetNormalizedScStreamUpServerSecs(),
+		" xmux={maxConc=", xmux.GetNormalizedMaxConcurrency(),
+		", maxConn=", xmux.GetNormalizedMaxConnections(),
+		", cReuse=", xmux.GetNormalizedCMaxReuseTimes(),
+		", hReq=", xmux.GetNormalizedHMaxRequestTimes(),
+		", hReuseSec=", xmux.GetNormalizedHMaxReusableSecs(),
+		", hKA=", xmux.HKeepAlivePeriod, "}",
+	)
 }
 
 func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXHTTPBaseOptions, tlsConfig tls.Config) DialerClient {
