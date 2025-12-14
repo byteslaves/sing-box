@@ -28,6 +28,7 @@ import (
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 )
 
 func RegisterOutbound(registry *outbound.Registry) {
@@ -68,7 +69,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		}
 	}
 	if options.Transport != nil {
-		outbound.transport, err = v2ray.NewClientTransport(ctx, outbound.dialer, outbound.serverAddr, common.PtrValueOrDefault(options.Transport), outbound.tlsConfig)
+		transportCtx := service.ContextWith[log.ContextLogger](ctx, logger)
+		outbound.transport, err = v2ray.NewClientTransport(transportCtx, outbound.dialer, outbound.serverAddr, common.PtrValueOrDefault(options.Transport), outbound.tlsConfig)
 		if err != nil {
 			return nil, E.Cause(err, "create client transport: ", options.Transport.Type)
 		}

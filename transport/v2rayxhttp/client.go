@@ -27,6 +27,7 @@ import (
 	"github.com/sagernet/sing-box/common/xray/pipe"
 	"github.com/sagernet/sing-box/common/xray/signal/done"
 	"github.com/sagernet/sing-box/common/xray/uuid"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	qtls "github.com/sagernet/sing-quic"
 	"github.com/sagernet/sing/common"
@@ -42,6 +43,9 @@ import (
 type Client struct {
 	ctx            context.Context
 	options        *option.V2RayXHTTPOptions
+	dest           M.Socksaddr
+	downloadDest   *M.Socksaddr
+	logger         log.ContextLogger
 	getRequestURL  func(sessionId string) url.URL
 	getRequestURL2 func(sessionId string) url.URL
 	getHTTPClient  func() (DialerClient, *XmuxClient)
@@ -161,6 +165,11 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 	getRequestURL2 := getRequestURL
 	getHTTPClient2 := getHTTPClient
+	var downloadDest *M.Socksaddr
+	var clientLogger log.ContextLogger
+	if l := service.FromContext[log.ContextLogger](ctx); l != nil {
+		clientLogger = l
+	}
 	if options.Download != nil {
 		options2 := options.Download
 		dialer2 := dialer
@@ -172,6 +181,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			}
 		}
 		dest2 := options2.ServerOptions.Build()
+		downloadDest = &dest2
 		var tlsConfig2 tls.Config
 		if options2.TLS != nil {
 			tlsConfig2, err = tls.NewClient(ctx, options2.Server, common.PtrValueOrDefault(options2.TLS))
@@ -205,6 +215,9 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	return &Client{
 		ctx:            ctx,
 		options:        &options,
+		dest:           dest,
+		downloadDest:   downloadDest,
+		logger:         clientLogger,
 		getHTTPClient:  getHTTPClient,
 		getHTTPClient2: getHTTPClient2,
 		getRequestURL:  getRequestURL,
@@ -220,6 +233,16 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	requestURL2 := c.getRequestURL2(sessionIdUuid.String())
 	httpClient, xmuxClient := c.getHTTPClient()
 	httpClient2, xmuxClient2 := c.getHTTPClient2()
+	httpVersion := httpVersionFromClient(httpClient)
+	logger := c.logger
+	if logger == nil {
+		logger = log.StdLogger()
+	}
+	logger.DebugContext(ctx, fmt.Sprintf("XHTTP is dialing to %s, mode %s, HTTP version %s, host %s", c.dest, mode, httpVersion, requestURL.Host))
+	if c.downloadDest != nil {
+		httpVersion2 := httpVersionFromClient(httpClient2)
+		logger.DebugContext(ctx, fmt.Sprintf("XHTTP is downloading from %s, mode %s, HTTP version %s, host %s", *c.downloadDest, "stream-down", httpVersion2, requestURL2.Host))
+	}
 	if xmuxClient != nil {
 		xmuxClient.OpenUsage.Add(1)
 	}
@@ -414,6 +437,16 @@ func isRealityConfig(tlsConfig tls.Config) bool {
 		return false
 	}
 	return strings.Contains(fmt.Sprintf("%T", tlsConfig), ".RealityClientConfig")
+}
+
+func httpVersionFromClient(client DialerClient) string {
+	if client == nil {
+		return "unknown"
+	}
+	if defaultClient, ok := client.(*DefaultDialerClient); ok {
+		return defaultClient.httpVersion
+	}
+	return "unknown"
 }
 
 func createHTTPClient(dest M.Socksaddr, dialer N.Dialer, options *option.V2RayXHTTPBaseOptions, tlsConfig tls.Config) DialerClient {
