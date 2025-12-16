@@ -23,7 +23,6 @@ require (
 	github.com/mholt/acmez/v3 v3.1.2
 	github.com/miekg/dns v1.1.67
 	github.com/oschwald/maxminddb-golang v1.13.1
-	github.com/quic-go/quic-go v0.55.0
 	github.com/sagernet/asc-go v0.0.0-20241217030726-d563060fe4e1
 	github.com/sagernet/bbolt v0.0.0-20231014093535-ea5cb2fe9f0a
 	github.com/sagernet/cors v1.2.1
@@ -63,6 +62,8 @@ require (
 //replace github.com/sagernet/sing => ../sing
 
 replace github.com/sagernet/sing-vmess => github.com/starifly/sing-vmess v0.2.7-mod.4
+
+replace github.com/sagernet/sing-tun => github.com/starifly/sing-tun v0.7.3-mod.2
 
 replace github.com/metacubex/sing-shadowsocks2 => github.com/Restia-Ashbell/sing-shadowsocks2 v0.0.0-20250606153500-31ef7b14aaa6
 
