@@ -42,7 +42,7 @@ func ClientHandshake(ctx context.Context, conn net.Conn, config Config) (Conn, e
 	defer cancel()
 	tlsConn, err := aTLS.ClientHandshake(ctx, conn, config)
 	if err != nil {
-    conn.Close()
+		conn.Close()
 		return nil, err
 	}
 	readWaitConn, err := badtls.NewReadWaitConn(tlsConn)
