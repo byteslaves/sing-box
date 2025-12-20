@@ -15,7 +15,6 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
-	"github.com/sagernet/sing/common/task"
 	"github.com/sagernet/sing/contrab/freelru"
 	"github.com/sagernet/sing/contrab/maphash"
 
@@ -141,10 +140,17 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 		!options.ClientSubnet.IsValid()
 	disableCache := !isSimpleRequest || c.disableCache || options.DisableCache
 	if !disableCache {
+		ctx, cancel := context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+
 		if c.cache != nil {
 			cond, loaded := c.cacheLock.LoadOrStore(question, make(chan struct{}))
 			if loaded {
-				<-cond
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-cond:
+				}
 			} else {
 				defer func() {
 					c.cacheLock.Delete(question)
@@ -154,7 +160,11 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 		} else if c.transportCache != nil {
 			cond, loaded := c.transportCacheLock.LoadOrStore(question, make(chan struct{}))
 			if loaded {
-				<-cond
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-cond:
+				}
 			} else {
 				defer func() {
 					c.transportCacheLock.Delete(question)
@@ -319,26 +329,7 @@ func (c *Client) Lookup(ctx context.Context, transport adapter.DNSTransport, dom
 	} else if strategy == C.DomainStrategyIPv6Only {
 		return c.lookupToExchange(ctx, transport, dnsName, dns.TypeAAAA, options, responseChecker)
 	}
-	var response4 []netip.Addr
-	var response6 []netip.Addr
-	var group task.Group
-	group.Append("exchange4", func(ctx context.Context) error {
-		response, err := c.lookupToExchange(ctx, transport, dnsName, dns.TypeA, options, responseChecker)
-		if err != nil {
-			return err
-		}
-		response4 = response
-		return nil
-	})
-	group.Append("exchange6", func(ctx context.Context) error {
-		response, err := c.lookupToExchange(ctx, transport, dnsName, dns.TypeAAAA, options, responseChecker)
-		if err != nil {
-			return err
-		}
-		response6 = response
-		return nil
-	})
-	err := group.Run(ctx)
+	response4, response6, err := c.lookupToExchange_A_AAAA(ctx, transport, dnsName, strategy, options, responseChecker)
 	if len(response4) == 0 && len(response6) == 0 {
 		return nil, err
 	}
