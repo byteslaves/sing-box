@@ -211,19 +211,28 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 
 	// For Vision: wrap the connection to expose the TLS/encryption connection for vless client
 	var visionBaseConn net.Conn // The connection to pass to Vision (TLS or encryption layer)
+	var visionCanSplice bool
 	if h.vision {
+		isRAWTransport := h.transport == nil
+
 		if baseConn != nil && !isVisionTLSConn(baseConn) {
 			baseConn = nil
 		}
 		if baseConn != nil {
 			// Has TLS/Reality: use baseConn (TLS connection)
 			visionBaseConn = baseConn
+			visionCanSplice = isRAWTransport
 			conn = newVisionConnWrapper(conn, baseConn)
 		} else if h.encryption != nil {
 			// Only has encryption (no TLS/Reality): use encryption layer itself
 			encConn := findEncryptionLayer(conn)
 			if encConn != nil {
 				visionBaseConn = encConn
+				if isXorConn(encConn) {
+					visionCanSplice = false
+				} else {
+					visionCanSplice = isRAWTransport
+				}
 				conn = newVisionConnWrapper(conn, encConn)
 			} else {
 				return nil, E.New("Vision: failed to find encryption layer")
@@ -239,7 +248,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 		if h.vision && visionBaseConn != nil {
 			// For Vision, we need to pass the base connection (TLS or encryption layer)
 			// to prepareConn so it can properly initialize VisionConn
-			return h.client.DialEarlyConnWithBase(conn, visionBaseConn, destination)
+			return h.client.DialEarlyConnWithOptions(conn, visionBaseConn, destination, visionCanSplice)
 		}
 		return h.client.DialEarlyConn(conn, destination)
 	case N.NetworkUDP:
@@ -385,6 +394,17 @@ func findEncryptionLayer(conn net.Conn) net.Conn {
 		break
 	}
 	return nil
+}
+
+func isXorConn(conn net.Conn) bool {
+	if conn == nil {
+		return false
+	}
+	connType := reflect.TypeOf(conn)
+	if connType == nil || connType.Kind() != reflect.Ptr {
+		return false
+	}
+	return connType.Elem().Name() == "XorConn"
 }
 
 type clientEncryptionConfig struct {

@@ -159,6 +159,10 @@ func (h *Inbound) Close() error {
 }
 
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	h.newConnectionExInternal(ctx, conn, metadata, onClose, h.transport == nil)
+}
+
+func (h *Inbound) newConnectionExInternal(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc, canSplice bool) {
 	if h.tlsConfig != nil && h.transport == nil {
 		tlsConn, err := tls.ServerHandshake(ctx, conn, h.tlsConfig)
 		if err != nil {
@@ -178,7 +182,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, metadata a
 		}
 		conn = encConn
 	}
-	err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
+	err := h.service.NewConnectionWithOptions(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose, canSplice)
 	if err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
@@ -324,5 +328,5 @@ func (h *inboundTransportHandler) NewConnectionEx(ctx context.Context, conn net.
 	//nolint:staticcheck
 	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
-	(*Inbound)(h).NewConnectionEx(ctx, conn, metadata, onClose)
+	(*Inbound)(h).newConnectionExInternal(ctx, conn, metadata, onClose, false)
 }
