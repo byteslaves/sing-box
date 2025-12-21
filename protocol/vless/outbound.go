@@ -221,43 +221,12 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 			conn = newVisionConnWrapper(conn, baseConn)
 		} else if h.encryption != nil {
 			// Only has encryption (no TLS/Reality): use encryption layer itself
-			// Find the actual encryption connection by unwrapping all layers
-			var encConn net.Conn
-			currentConn := conn
-
-			// Unwrap up to 10 layers to find the encryption layer
-			for i := 0; i < 10; i++ {
-				// Check if current connection is encryption layer
-				if currentConn != nil {
-					typeName := ""
-					if reflect.TypeOf(currentConn).Kind() == reflect.Ptr {
-						typeName = reflect.TypeOf(currentConn).Elem().Name()
-					}
-					if typeName == "CommonConn" || typeName == "XorConn" {
-						encConn = currentConn
-						break
-					}
-				}
-
-				// Try to unwrap to next layer
-				if upstream, ok := currentConn.(common.WithUpstream); ok {
-					if next := upstream.Upstream(); next != nil {
-						if nextConn, ok := next.(net.Conn); ok {
-							currentConn = nextConn
-							continue
-						}
-					}
-				}
-
-				// Can't unwrap further
-				break
-			}
-
+			encConn := findEncryptionLayer(conn)
 			if encConn != nil {
 				visionBaseConn = encConn
 				conn = newVisionConnWrapper(conn, encConn)
 			} else {
-				return nil, E.New("Vision: failed to find encryption layer (CommonConn/XorConn)")
+				return nil, E.New("Vision: failed to find encryption layer")
 			}
 		} else {
 			return nil, E.New("Vision requires either TLS/Reality or Encryption")
@@ -398,6 +367,24 @@ func isVisionTLSConn(conn net.Conn) bool {
 		}
 	}
 	return false
+}
+
+func findEncryptionLayer(conn net.Conn) net.Conn {
+	for conn != nil {
+		if enc, ok := conn.(encryption.EncryptionConn); ok && enc.IsEncryptionLayer() {
+			return conn
+		}
+		if upstream, ok := conn.(common.WithUpstream); ok {
+			if next := upstream.Upstream(); next != nil {
+				if nextConn, ok := next.(net.Conn); ok {
+					conn = nextConn
+					continue
+				}
+			}
+		}
+		break
+	}
+	return nil
 }
 
 type clientEncryptionConfig struct {

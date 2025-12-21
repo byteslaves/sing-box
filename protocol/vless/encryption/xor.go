@@ -95,3 +95,7 @@ func (c *XorConn) Read(b []byte) (int, error) {
 func (c *XorConn) Upstream() any {
 	return c.Conn
 }
+
+func (c *XorConn) IsEncryptionLayer() bool {
+	return true
+}

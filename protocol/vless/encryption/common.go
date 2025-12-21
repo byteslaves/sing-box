@@ -25,6 +25,11 @@ var OutBytesPool = sync.Pool{
 	},
 }
 
+type EncryptionConn interface {
+	net.Conn
+	IsEncryptionLayer() bool
+}
+
 type CommonConn struct {
 	net.Conn
 	UseAES      bool
@@ -153,6 +158,10 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 // Upstream returns the underlying connection, allowing Vision to unwrap and access the TLS connection
 func (c *CommonConn) Upstream() any {
 	return c.Conn
+}
+
+func (c *CommonConn) IsEncryptionLayer() bool {
+	return true
 }
 
 type AEAD struct {
