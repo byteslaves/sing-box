@@ -159,7 +159,11 @@ func (h *Inbound) Close() error {
 }
 
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	h.newConnectionExInternal(ctx, conn, metadata, onClose, h.transport == nil)
+	canSplice := h.transport == nil
+	if canSplice && h.decryption != nil && h.decryption.IsFullRandomXorMode() {
+		canSplice = false
+	}
+	h.newConnectionExInternal(ctx, conn, metadata, onClose, canSplice)
 }
 
 func (h *Inbound) newConnectionExInternal(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc, canSplice bool) {

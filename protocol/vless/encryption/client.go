@@ -62,6 +62,10 @@ func (i *ClientInstance) Init(nfsPKeysBytes [][]byte, xorMode, seconds uint32, p
 	return ParsePadding(padding, &i.PaddingLens, &i.PaddingGaps)
 }
 
+func (i *ClientInstance) IsFullRandomXorMode() bool {
+	return i.XorMode == 2
+}
+
 func (i *ClientInstance) Handshake(conn net.Conn) (*CommonConn, error) {
 	if i.NfsPKeys == nil {
 		return nil, E.New("uninitialized")

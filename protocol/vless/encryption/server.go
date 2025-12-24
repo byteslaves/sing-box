@@ -114,6 +114,14 @@ func (i *ServerInstance) Close() (err error) {
 	return
 }
 
+func (i *ServerInstance) IsXorMode() bool {
+	return i.XorMode > 0
+}
+
+func (i *ServerInstance) IsFullRandomXorMode() bool {
+	return i.XorMode == 2
+}
+
 func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn, error) {
 	if i.NfsSKeys == nil {
 		return nil, E.New("uninitialized")

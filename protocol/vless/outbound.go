@@ -228,7 +228,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 			encConn := findEncryptionLayer(conn)
 			if encConn != nil {
 				visionBaseConn = encConn
-				if isXorConn(encConn) {
+				if h.encryption.IsFullRandomXorMode() {
 					visionCanSplice = false
 				} else {
 					visionCanSplice = isRAWTransport
@@ -394,17 +394,6 @@ func findEncryptionLayer(conn net.Conn) net.Conn {
 		break
 	}
 	return nil
-}
-
-func isXorConn(conn net.Conn) bool {
-	if conn == nil {
-		return false
-	}
-	connType := reflect.TypeOf(conn)
-	if connType == nil || connType.Kind() != reflect.Ptr {
-		return false
-	}
-	return connType.Elem().Name() == "XorConn"
 }
 
 type clientEncryptionConfig struct {

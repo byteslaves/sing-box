@@ -61,7 +61,7 @@ require (
 
 //replace github.com/sagernet/sing => ../sing
 
-replace github.com/sagernet/sing-vmess => github.com/starifly/sing-vmess v0.2.7-mod.7
+replace github.com/sagernet/sing-vmess => github.com/starifly/sing-vmess v0.2.7-mod.8
 
 replace github.com/metacubex/sing-shadowsocks2 => github.com/Restia-Ashbell/sing-shadowsocks2 v0.0.0-20250606153500-31ef7b14aaa6
 
