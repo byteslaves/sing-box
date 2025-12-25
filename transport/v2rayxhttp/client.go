@@ -172,7 +172,11 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	requestURL := c.getRequestURL(sessionIdUuid.String())
 	requestURL2 := c.getRequestURL2(sessionIdUuid.String())
 	httpClient, xmuxClient := c.getHTTPClient()
-	httpClient2, xmuxClient2 := c.getHTTPClient2()
+	var httpClient2 DialerClient
+	var xmuxClient2 *XmuxClient
+	if mode != "stream-one" || c.downloadDest != nil {
+		httpClient2, xmuxClient2 = c.getHTTPClient2()
+	}
 	httpVersion := httpVersionFromClient(httpClient)
 	destLabel := formatDestWithNetwork(httpClient, c.dest)
 	logger := c.logger
