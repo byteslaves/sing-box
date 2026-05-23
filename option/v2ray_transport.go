@@ -534,6 +534,8 @@ type V2RayKCPOptions struct {
 	WriteBufferSize  uint32 `json:"write_buffer_size,omitempty"`
 	HeaderType       string `json:"header_type,omitempty"`
 	Seed             string `json:"seed,omitempty"`
+	CwndMultiplier   uint32 `json:"cwnd_multiplier,omitempty"`
+	MaxSendingWindow uint32 `json:"max_sending_window,omitempty"`
 }
 
 func (k *V2RayKCPOptions) GetMTU() uint32 {
@@ -547,6 +549,7 @@ func (k *V2RayKCPOptions) GetTTI() uint32 {
 	if k.TTI == 0 {
 		return 50
 	}
+	// Valid range: 10-5000 (extended from 10-100 to support high-latency networks)
 	return k.TTI
 }
 
@@ -583,4 +586,15 @@ func (k *V2RayKCPOptions) GetHeaderType() string {
 		return "none"
 	}
 	return k.HeaderType
+}
+
+func (k *V2RayKCPOptions) GetCwndMultiplier() uint32 {
+	if k.CwndMultiplier == 0 {
+		return 20
+	}
+	return k.CwndMultiplier
+}
+
+func (k *V2RayKCPOptions) GetMaxSendingWindow() uint32 {
+	return k.MaxSendingWindow
 }
