@@ -24,6 +24,7 @@
 | `shadowsocks` | [Shadowsocks](./shadowsocks/) | TCP              |
 | `vmess`       | [VMess](./vmess/)             | TCP              |
 | `trojan`      | [Trojan](./trojan/)           | TCP              |
+| `snell`       | [Snell](./snell/)             | TCP              |
 | `naive`       | [Naive](./naive/)             | :material-close: |
 | `hysteria`    | [Hysteria](./hysteria/)       | :material-close: |
 | `shadowtls`   | [ShadowTLS](./shadowtls/)     | TCP              |
