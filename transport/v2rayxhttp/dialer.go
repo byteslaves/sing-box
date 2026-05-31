@@ -8,20 +8,25 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"reflect"
 	"strings"
 	"sync"
+	"unsafe"
 
-	common "github.com/sagernet/sing-box/common/xray"
+	"github.com/sagernet/quic-go/http3"
 	"github.com/sagernet/sing-box/common/vision"
+	common "github.com/sagernet/sing-box/common/xray"
 	"github.com/sagernet/sing-box/common/xray/buf"
 	"github.com/sagernet/sing-box/common/xray/signal/done"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
+	"golang.org/x/net/http2"
 )
 
 // interface to abstract between use of browser dialer, vs net/http
 type DialerClient interface {
 	IsClosed() bool
+	Close()
 
 	OpenStream(context.Context, string, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error)
 	PostPacket(context.Context, string, string, string, buf.MultiBuffer) error
@@ -36,9 +41,54 @@ type DefaultDialerClient struct {
 	// pool of net.Conn, created using dialUploadConn
 	uploadRawPool  *sync.Pool
 	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
+
+	mtx sync.RWMutex
+}
+
+type clientConnPool struct {
+	t     *http2.Transport
+	mu    sync.Mutex
+	conns map[string][]*http2.ClientConn
+}
+
+type efaceWords struct {
+	typ  unsafe.Pointer
+	data unsafe.Pointer
+}
+
+//go:linkname transportConnPool golang.org/x/net/http2.(*Transport).connPool
+func transportConnPool(t *http2.Transport) http2.ClientConnPool
+
+func (c *DefaultDialerClient) Close() {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+	switch transport := c.client.Transport.(type) {
+	case *http.Transport:
+		transport.CloseIdleConnections()
+	case *http2.Transport:
+		connPool := transportConnPool(transport)
+		p := (*clientConnPool)((*efaceWords)(unsafe.Pointer(&connPool)).data)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		for _, vv := range p.conns {
+			for _, cc := range vv {
+				cc.Close()
+			}
+		}
+	case *http3.Transport:
+		transport.Close()
+	default:
+		panic(E.New("unknown transport type: ", reflect.TypeOf(transport)))
+	}
 }
 
 func (c *DefaultDialerClient) IsClosed() bool {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
 	return c.closed
 }
 
@@ -65,28 +115,20 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		resp, err := c.client.Do(req)
 		if err != nil {
 			if !uploadOnly {
-				c.closed = true
+				c.Close()
 			}
 			gotConn.Close()
-			if body != nil {
-				if closer, ok := body.(io.Closer); ok {
-					closer.Close()
-				}
-			}
+			common.Close(body)
 			wrc.Close()
 			return
 		}
 		if resp.StatusCode != 200 || uploadOnly {
 			if resp.StatusCode != 200 {
-				c.closed = true
+				c.Close()
 			}
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			if body != nil {
-				if closer, ok := body.(io.Closer); ok {
-					closer.Close()
-				}
-			}
+			common.Close(body)
 			wrc.Close()
 			return
 		}
@@ -106,13 +148,13 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 	if c.httpVersion != "1.1" {
 		resp, err := c.client.Do(req)
 		if err != nil {
-			c.closed = true
+			c.Close()
 			return err
 		}
 		_, copyErr := io.Copy(io.Discard, resp.Body)
 		closeErr := resp.Body.Close()
 		if resp.StatusCode != 200 {
-			c.closed = true
+			c.Close()
 			if copyErr != nil {
 				return copyErr
 			}
@@ -148,13 +190,13 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 				if h1UploadConn.UnreadedResponsesCount > 0 {
 					resp, err := http.ReadResponse(h1UploadConn.RespBufReader, req)
 					if err != nil {
-						c.closed = true
+						c.Close()
 						return fmt.Errorf("error while reading response: %s", err.Error())
 					}
 					_, copyErr := io.Copy(io.Discard, resp.Body)
 					closeErr := resp.Body.Close()
 					if resp.StatusCode != 200 {
-						c.closed = true
+						c.Close()
 						return fmt.Errorf("got non-200 error response code: %d", resp.StatusCode)
 					}
 					if copyErr != nil {
@@ -180,8 +222,8 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 type WaitReadCloser struct {
 	Wait chan struct{}
 	io.ReadCloser
-	mu   sync.Mutex
-	once sync.Once
+	mu     sync.Mutex
+	once   sync.Once
 	closed bool
 }
 

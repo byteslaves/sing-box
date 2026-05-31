@@ -184,10 +184,10 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		logger.DebugContext(ctx, fmt.Sprintf("XHTTP is downloading from %s, mode %s, HTTP version %s, host %s", destLabel2, "stream-down", httpVersion2, requestURL2.Host))
 	}
 	if xmuxClient != nil {
-		xmuxClient.OpenUsage.Add(1)
+		xmuxClient.AddOpenUsage(1)
 	}
 	if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-		xmuxClient2.OpenUsage.Add(1)
+		xmuxClient2.AddOpenUsage(1)
 	}
 	var closed atomic.Int32
 	uploadBaseCtx := context.WithoutCancel(ctx)
@@ -201,10 +201,10 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 			}
 			cancelUpload()
 			if xmuxClient != nil {
-				xmuxClient.OpenUsage.Add(-1)
+				xmuxClient.AddOpenUsage(-1)
 			}
 			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-				xmuxClient2.OpenUsage.Add(-1)
+				xmuxClient2.AddOpenUsage(-1)
 			}
 		},
 	}
@@ -253,6 +253,8 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		defer uploadPipeReader.Interrupt()
 		var seq int64
 		var lastWrite time.Time
+		dynamicHTTPClient := httpClient
+		dynamicXmuxClient := xmuxClient
 		for {
 			select {
 			case <-uploadCtx.Done():
@@ -288,15 +290,15 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 				default:
 				}
 				lastWrite = time.Now()
-				if xmuxClient != nil && (xmuxClient.LeftRequests.Add(-1) <= 0 ||
-					(xmuxClient.UnreusableAt != time.Time{} && lastWrite.After(xmuxClient.UnreusableAt))) {
-					httpClient, xmuxClient = c.getHTTPClient()
+				if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Add(-1) <= 0 ||
+					(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
+					dynamicHTTPClient, dynamicXmuxClient = c.getHTTPClient()
 				}
-				go func(chunk buf.MultiBuffer, baseCtx context.Context, seqStr string) {
+				go func(chunk buf.MultiBuffer, baseCtx context.Context, seqStr string, hClient DialerClient) {
 					postCtx, cancelPost := context.WithCancel(baseCtx)
 					defer cancelPost()
 					defer wroteRequest.Close()
-					err := httpClient.PostPacket(
+					err := hClient.PostPacket(
 						postCtx,
 						url.String(),
 						sessionId,
@@ -307,8 +309,8 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 						uploadPipeReader.Interrupt()
 						doSplit.Store(false)
 					}
-				}(chunk, reqCtx, seqStr)
-				if _, ok := httpClient.(*DefaultDialerClient); ok {
+				}(chunk, reqCtx, seqStr, dynamicHTTPClient)
+				if _, ok := dynamicHTTPClient.(*DefaultDialerClient); ok {
 					select {
 					case <-wroteRequest.Wait():
 					case <-uploadCtx.Done():
@@ -337,7 +339,7 @@ func decideHTTPVersion(tlsConfig tls.Config) string {
 	if len(nextProtos) == 0 {
 		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS, "http/1.1"})
 	}
-	
+
 	if len(nextProtos) > 0 && nextProtos[0] == "h3" {
 		return "3"
 	}
