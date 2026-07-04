@@ -161,6 +161,13 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	return o, nil
 }
 
+func (h *Outbound) Close() error {
+	if h.pool != nil {
+		return h.pool.Close()
+	}
+	return nil
+}
+
 func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	ctx, metadata := adapter.ExtendContext(ctx)
 	metadata.Outbound = h.Tag()
@@ -264,6 +271,7 @@ type v5LazyPacketConn struct {
 	// sniffQUIC is set when the router's sniff result identified this flow as QUIC.
 	// It takes priority over the first-byte heuristic.
 	sniffQUIC bool
+	cancel    context.CancelFunc
 
 	once           sync.Once
 	initCh         chan struct{} // closed once conn is ready
@@ -285,9 +293,18 @@ type v5LazyPacketConn struct {
 }
 
 func newV5LazyPacketConn(ctx context.Context, ob *Outbound, src, dst M.Socksaddr, sniffQUIC bool) *v5LazyPacketConn {
+	// Lazy initialization may run after DialContext returns and Happy Eyeballs cancels its racer context.
+	initCtx := context.WithoutCancel(ctx)
+	var cancel context.CancelFunc
+	if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+		initCtx, cancel = context.WithDeadline(initCtx, deadline)
+	} else {
+		initCtx, cancel = context.WithCancel(initCtx)
+	}
 	return &v5LazyPacketConn{
 		outbound:    ob,
-		ctx:         ctx,
+		ctx:         initCtx,
+		cancel:      cancel,
 		source:      src,
 		destination: dst,
 		sniffQUIC:   sniffQUIC,
@@ -296,6 +313,7 @@ func newV5LazyPacketConn(ctx context.Context, ob *Outbound, src, dst M.Socksaddr
 }
 
 func (c *v5LazyPacketConn) initConn(p []byte, addr net.Addr) {
+	defer c.cancel()
 	useQUIC := c.sniffQUIC || (len(p) > 0 && snell.IsQUICInitial(p[0]))
 	if useQUIC {
 		// Always use c.destination (resolved at ListenPacket/DialContext time, after
@@ -388,6 +406,7 @@ func (c *v5LazyPacketConn) Close() error {
 	// Signal intent before the select so initConn's post-close check is
 	// guaranteed to observe it if initCh is not yet closed.
 	c.closeRequested.Store(true)
+	c.cancel()
 	select {
 	case <-c.initCh:
 		// initConn has finished; close the underlying conn exactly once.
