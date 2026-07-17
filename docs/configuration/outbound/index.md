@@ -24,7 +24,6 @@
 | `shadowsocks`  | [Shadowsocks](./shadowsocks/)   |
 | `vmess`        | [VMess](./vmess/)               |
 | `trojan`       | [Trojan](./trojan/)             |
-| `snell`        | [Snell](./snell/)               |
 | `wireguard`    | [Wireguard](./wireguard/)       |
 | `hysteria`     | [Hysteria](./hysteria/)         |
 | `vless`        | [VLESS](./vless/)               |
@@ -32,6 +31,7 @@
 | `tuic`         | [TUIC](./tuic/)                 |
 | `hysteria2`    | [Hysteria2](./hysteria2/)       |
 | `anytls`       | [AnyTLS](./anytls/)             |
+| `snell`        | [Snell](./snell/)               |
 | `tor`          | [Tor](./tor/)                   |
 | `ssh`          | [SSH](./ssh/)                   |
 | `dns`          | [DNS](./dns/)                   |

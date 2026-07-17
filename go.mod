@@ -24,7 +24,6 @@ require (
 	github.com/mholt/acmez/v3 v3.1.2
 	github.com/miekg/dns v1.1.67
 	github.com/oschwald/maxminddb-golang v1.13.1
-	github.com/reF1nd/sing-snell v0.0.8
 	github.com/sagernet/asc-go v0.0.0-20241217030726-d563060fe4e1
 	github.com/sagernet/bbolt v0.0.0-20231014093535-ea5cb2fe9f0a
 	github.com/sagernet/cors v1.2.1
@@ -38,6 +37,7 @@ require (
 	github.com/sagernet/sing-shadowsocks v0.2.8
 	github.com/sagernet/sing-shadowsocks2 v0.2.1
 	github.com/sagernet/sing-shadowtls v0.2.1-0.20250503051639-fcd445d33c11
+	github.com/sagernet/sing-snell v0.0.0-20260710094516-a4e97ee24beb
 	github.com/sagernet/sing-tun v0.7.10
 	github.com/sagernet/sing-vmess v0.2.7
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1
@@ -64,6 +64,8 @@ require (
 //replace github.com/sagernet/sing => ../sing
 
 replace github.com/sagernet/sing-vmess => github.com/starifly/sing-vmess v0.2.8-mod.1
+
+replace github.com/sagernet/sing-snell => github.com/reF1nd/sing-snell v0.0.0-20260713132549-9711346e2b35
 
 replace github.com/metacubex/sing-shadowsocks2 => github.com/Restia-Ashbell/sing-shadowsocks2 v0.0.0-20250606153500-31ef7b14aaa6
 
